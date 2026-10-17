@@ -926,14 +926,18 @@ export class SettingsManager {
 		field: keyof CompactionModelOverride,
 		model?: Pick<Model<string>, "provider" | "id">,
 	): number {
+		// 获取配置里面的压缩配置
 		const compaction = this.settings.compaction;
+		// 获取配置里面的原始值
 		const ordinary = compaction?.[field];
+		// 如果原始值存在，但配置的类型不对，报错
 		if (ordinary !== undefined && (typeof ordinary !== "number" || !Number.isSafeInteger(ordinary) || ordinary < 0)) {
 			throw new Error(
 				`Invalid compaction.${field} setting: ${String(ordinary)}. Expected a non-negative safe integer.`,
 			);
 		}
 
+		// 从压缩配置中查看是否有对特定模型做定制的配置
 		const modelKey = model ? `${model.provider}/${model.id}` : undefined;
 		const entry = modelKey !== undefined ? compaction?.modelOverrides?.[modelKey] : undefined;
 		if (entry !== undefined && !isMergeableObject(entry)) {
@@ -941,12 +945,15 @@ export class SettingsManager {
 				`Invalid compaction.modelOverrides["${modelKey}"] setting: ${String(entry)}. Expected an object.`,
 			);
 		}
+		// 如果有的话，获取要重写的配置值
 		const override = entry?.[field];
+		// 判断配置值的类型是否正确
 		if (override !== undefined && (typeof override !== "number" || !Number.isSafeInteger(override) || override < 0)) {
 			throw new Error(
 				`Invalid compaction.modelOverrides["${modelKey}"].${field} setting: ${String(override)}. Expected a non-negative safe integer.`,
 			);
 		}
+		// 优先使用重写配置，其次原始配置，最后使用默认配置
 		return override ?? ordinary ?? DEFAULT_COMPACTION_TOKEN_SETTINGS[field];
 	}
 
@@ -964,9 +971,13 @@ export class SettingsManager {
 		reserveTokens: number;
 		keepRecentTokens: number;
 	} {
+		// 组装压缩要用到的三个变量返回
 		return {
+			// 是否开启压缩，从settings配置中获取
 			enabled: this.getCompactionEnabled(),
+			// 压缩要保留的token数量
 			reserveTokens: this.getCompactionReserveTokens(model),
+			// 要保留的最近的token数量
 			keepRecentTokens: this.getCompactionKeepRecentTokens(model),
 		};
 	}

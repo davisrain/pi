@@ -275,6 +275,7 @@ export function assertValidSessionId(id: string): void {
 
 /** Generate a unique short ID (8 hex chars, collision-checked) */
 function generateId(byId: { has(id: string): boolean }): string {
+	// 尝试使用uuid前八位，去查看byId索引里面是否已经存在生成的id了，如果不存在，直接用生成的，否则退化为全量的uuid
 	for (let i = 0; i < 100; i++) {
 		const id = randomUUID().slice(0, 8);
 		if (!byId.has(id)) return id;
@@ -392,25 +393,30 @@ function buildSessionPath(
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 ): SessionEntry[] {
+	// 构建id到entry的索引，如果byId存在，直接返回byId就好了
 	const index = buildEntryIndex(entries, byId);
 	let leaf: SessionEntry | undefined;
 	if (leafId === null) {
 		return [];
 	}
+	// 根据leafId找到叶子节点
 	if (leafId) {
 		leaf = index.get(leafId);
 	}
+	// 如果叶子节点没找到，直接返回entries数组的最后一个元素
 	leaf ??= entries[entries.length - 1];
 	if (!leaf) {
 		return [];
 	}
 
+	// 不停地往上找parent，直到parent为undefined的时候停止
 	const path: SessionEntry[] = [];
 	let current: SessionEntry | undefined = leaf;
 	while (current) {
 		path.push(current);
 		current = current.parentId ? index.get(current.parentId) : undefined;
 	}
+	// 然后反转数组，得到从root到leaf这一整个节点path
 	path.reverse();
 	return path;
 }
@@ -419,16 +425,19 @@ function getSessionContextSettings(path: SessionEntry[]): Pick<SessionContext, "
 	let thinkingLevel = "off";
 	let model: { provider: string; modelId: string } | null = null;
 
+	// 遍历路径
 	for (const entry of path) {
+		// 如果发现对应的change entry的话，更新变量
 		if (entry.type === "thinking_level_change") {
 			thinkingLevel = entry.thinkingLevel;
 		} else if (entry.type === "model_change") {
 			model = { provider: entry.provider, modelId: entry.modelId };
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
+			// 如果是ai message的entry，直接用ai返回的消息内容更新model
 			model = { provider: entry.message.provider, modelId: entry.message.model };
 		}
 	}
-
+	// 最后返回thinkingLevel和model
 	return { thinkingLevel, model };
 }
 
@@ -437,27 +446,35 @@ function getSessionContextSettings(path: SessionEntry[]): Pick<SessionContext, "
  * Plain custom entries are display/state entries and do not participate in context.
  */
 export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage[] {
+	// 如果是MessageEntry
 	if (entry.type === "message") {
+		// 获取它持有的message
 		const message = entry.message;
 		// Session files are parsed without validation; old versions, forks, or
 		// hand-edited files can contain messages with null/missing content.
+		// 如果是systemMessage且content为null，转换成空字符串返回
 		if (message.role === "system" && message.content == null) return [{ ...message, content: "" }];
+		// 如果是user ai toolResult 这几种类型，且content为null，转成空数组返回
 		if (
 			(message.role === "user" || message.role === "assistant" || message.role === "toolResult") &&
 			message.content == null
 		) {
 			return [{ ...message, content: [] }];
 		}
+		// 如果没有空的content，直接返回
 		return [message];
 	}
+	// 构建customMessage返回
 	if (entry.type === "custom_message") {
 		return [
 			createCustomMessage(entry.customType, entry.content ?? [], entry.display, entry.details, entry.timestamp),
 		];
 	}
+	// 如果是branchSummaryEntry类型的且summary存在，构建BranchSummaryMessage返回
 	if (entry.type === "branch_summary" && entry.summary) {
 		return [createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp)];
 	}
+	// 如果是compactionEntry，构建CompactionSummaryMessage类型的消息返回，如果有SystemMessage，也一并返回
 	if (entry.type === "compaction") {
 		const summary = createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp);
 		return entry.systemMessage ? [entry.systemMessage, summary] : [summary];
@@ -478,35 +495,44 @@ export function buildContextEntries(
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 ): SessionEntry[] {
+	// 获取root到leaf的节点路径数组
 	const path = buildSessionPath(entries, leafId, byId);
 	let compaction: CompactionEntry | null = null;
 
+	// 遍历，找到压缩的entry，注意这里是一直往后找，找到最新的那个compactionEntry
 	for (const entry of path) {
 		if (entry.type === "compaction") {
 			compaction = entry;
 		}
 	}
 
+	// 如果不存在压缩entry，直接返回path
 	if (!compaction) {
 		return path;
 	}
 
+	// 找到压缩entry在path数组中的下标
 	const compactionIdx = path.findIndex((entry) => entry.id === compaction.id);
 	if (compactionIdx < 0) {
 		return path;
 	}
 
+	// 先将压缩entry放进context数组
 	const contextEntries: SessionEntry[] = [compaction];
 	let foundFirstKept = false;
+	// 从0开始遍历到压缩entry的下标
 	for (let i = 0; i < compactionIdx; i++) {
 		const entry = path[i];
+		// 找到第一个保留的entry的id
 		if (entry.id === compaction.firstKeptEntryId) {
 			foundFirstKept = true;
 		}
+		// 如果已经找到了第一个保留的entry，并且当前entry不是systemMessage的话，将其添加进context数组中
 		if (foundFirstKept && !(entry.type === "message" && entry.message.role === "system")) {
 			contextEntries.push(entry);
 		}
 	}
+	// 最后往context数组中添加压缩entry后面的所有entry
 	contextEntries.push(...path.slice(compactionIdx + 1));
 	return contextEntries;
 }
@@ -517,11 +543,14 @@ export function buildContextEntries(
  * Handles compaction and branch summaries along the path.
  */
 function projectContextEntry(entry: SessionEntry, edit: ContextEditEntry | undefined): AgentMessage[] {
+	// 将sessionEntry转换成messages数组
 	const messages = sessionEntryToContextMessages(entry);
+	// 如果没有修改它的editEntry，直接返回
 	if (!edit) return messages;
 	const replacement = edit.replacement;
 	if (replacement === null) return [];
 
+	// 遍历messages数组，修改对应类型消息里面的content
 	return messages.map((message) => {
 		if (
 			message.role !== "user" &&
@@ -545,10 +574,14 @@ export function buildSessionProjection(
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 ): SessionProjection {
+	// 获取root到leafId的一整个路径上的节点数组
 	const path = buildSessionPath(entries, leafId, byId);
+	// 根据整个节点路径推算出当前用到的model和thinkingLevel
 	const { thinkingLevel, model } = getSessionContextSettings(path);
+	// 构建给llm传输的上下文entries，里面会涉及到compactionEntry的逻辑，即只会输出compactionEntry + keptEntries + afterCompactEntries
 	const contextEntries = buildContextEntries(entries, leafId, byId);
 	const edits = new Map<string, ContextEditEntry>();
+	// 从contextEntries里面找出类型是context_edit的entry，并且构建它修改的目标entryId到它自身的映射
 	for (const entry of contextEntries) {
 		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
 	}
@@ -558,15 +591,25 @@ export function buildSessionProjection(
 			// buildContextEntries() may retain an older compaction entry because its
 			// raw ID lies inside the newest retained range. Only the newest compaction
 			// at index zero contributes a checkpoint and summary.
+			// buildContextEntries这个方法可能会出现keptEntries这一块内容里面有以前的compactEntry，这些需要被剔除
+			// 因此只有在contextEntries里面index为0的compactEntry才可以被保留
+
+			// 将entry里面持有的内容转换成messages数组返回
 			messages:
 				sourceEntry.type === "compaction" && index > 0
 					? []
-					: projectContextEntry(sourceEntry, edits.get(sourceEntry.id)),
+					: // 处理sourceEntry，拿到messages，并且尝试拿到修改这个entry的editEntry去修改messages里面的内容。
+						// 通过sessionEntry生成会话投影，可以理解为根据持久化的文件内容生成一个给llm读取的会话视图。
+						projectContextEntry(sourceEntry, edits.get(sourceEntry.id)),
 		}),
 	);
+	// 根据sessionPath生成llm可以读取的会话投影，里面处理了compact等逻辑
 	return {
+		// 将转换好的projectedEntries传入
 		entries: projectedEntries,
+		// 并且将ProjectedSessionEntry的messages数组都展开合并
 		messages: projectedEntries.flatMap((entry) => entry.messages),
+		// 将最新的thinkingLevel和model也传入
 		thinkingLevel,
 		model,
 	};
@@ -985,17 +1028,29 @@ async function listSessionsFromDir(
  * handles compaction summaries and follows the path from root to current leaf.
  */
 export class SessionManager {
+	// 当前session的id，如果没有传入，在newSession的时候会创建
 	private sessionId: string = "";
+	// 持久化文件所在的path
 	private sessionFile: string | undefined;
+	// 文件所在的目录
 	private sessionDir: string;
+	// 工作目录
 	private cwd: string;
+	// 是否需要持久化
 	private persist: boolean;
+	// 文件是否已经落盘
 	private flushed: boolean = false;
+	// 第一个元素是SessionHeader，其余剩余的元素就是SessionEntry，按照append的顺序排列，不是树的顺序
 	private fileEntries: FileEntry[] = [];
+	// id -> sessionEntry的索引
+	// 有多种类型的sessionEntry，用type来区分，另外每个entry都有id和parentId
 	private byId: Map<string, SessionEntry> = new Map();
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
+	// 当前的叶子指针
 	private leafId: string | null = null;
+	// 每次appendXxx()的时候都是一个模版，创建一个新的entry，id重新生成，parentId指向当前的leafId，然后添加进fileEntries、byId里面，
+	// 然后leafId指向新的entryId，构成树的结构
 
 	private constructor(
 		cwd: string,
@@ -1005,9 +1060,13 @@ export class SessionManager {
 		newSessionOptions?: NewSessionOptions,
 		preloadedFileEntries?: FileEntry[],
 	) {
+		// 解析工作目录
 		this.cwd = resolvePath(cwd);
+		// 规范化session的文件夹
 		this.sessionDir = normalizePath(sessionDir);
+		// 决定是否要持久化
 		this.persist = persist;
+		// 如果发现目录不存在的话，创建它
 		if (persist && this.sessionDir && !existsSync(this.sessionDir)) {
 			mkdirSync(this.sessionDir, { recursive: true });
 		}
@@ -1058,8 +1117,10 @@ export class SessionManager {
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
 		}
+		// 创建一个uuid作为sessionId
 		this.sessionId = options?.id ?? createSessionId();
 		const timestamp = new Date().toISOString();
+		// 创建sessionHeader
 		const header: SessionHeader = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
@@ -1068,13 +1129,18 @@ export class SessionManager {
 			cwd: this.cwd,
 			parentSession: options?.parentSession,
 		};
+		// 然后往fileEntries里面添加一个header
 		this.fileEntries = [header];
+		// 清空各个索引
 		this.byId.clear();
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
+		// 清空指针
 		this.leafId = null;
+		// 标记为还未刷盘
 		this.flushed = false;
 
+		// 如果是需要持久化的，根据时间戳创建一个jsonl文件
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
 			this.sessionFile = join(this.getSessionDir(), `${fileTimestamp}_${this.sessionId}.jsonl`);
@@ -1170,28 +1236,41 @@ export class SessionManager {
 	}
 
 	_persist(entry: SessionEntry): void {
+		// 如果不需要持久化，或者没有文件，直接返回
 		if (!this.persist || !this.sessionFile) return;
 
+		// 如果文件还没有flush
 		if (!this.flushed) {
+			// 判断是否有message类型的entry，且message是user或者ai的，如果没有，暂时先不刷盘
 			if (!this._hasConversation()) return;
+			// 如果有的话，建立fd
 			const fd = openSync(this.sessionFile, "wx");
 			try {
+				// 将entry序列化为json写入文件
 				for (const e of this.fileEntries) {
 					writeFileSync(fd, `${JSON.stringify(e)}\n`);
 				}
 			} finally {
+				// 关闭fd
 				closeSync(fd);
 			}
+			// 将flushed标志设置为true
 			this.flushed = true;
 		} else {
+			// 如果已经flush过了，往文件里面添加这条entry的内容
 			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
 		}
 	}
 
+	// 通用方法，每个append方法必调用
 	private _appendEntry(entry: SessionEntry): void {
+		// 添加进fileEntries数组
 		this.fileEntries.push(entry);
+		// 放入byId 索引map
 		this.byId.set(entry.id, entry);
+		// 将leafId指向新的id
 		this.leafId = entry.id;
+		// 尝试持久化
 		this._persist(entry);
 	}
 
@@ -1202,6 +1281,7 @@ export class SessionManager {
 	 * These need to be appended via appendCompaction() and appendBranchSummary() methods.
 	 */
 	appendMessage(message: Message | CustomMessage | BashExecutionMessage): string {
+		// 创建messageEntry
 		const entry: SessionMessageEntry = {
 			type: "message",
 			id: generateId(this.byId),
@@ -1209,6 +1289,7 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			message,
 		};
+		// 添加entry
 		this._appendEntry(entry);
 		return entry.id;
 	}
@@ -1491,6 +1572,7 @@ export class SessionManager {
 	 * Uses tree traversal from current leaf.
 	 */
 	buildSessionProjection(): SessionProjection {
+		// 从leaf遍历树结构中的sessionEntry 构建发送给llm的会话上下文，
 		return buildSessionProjection(this.getEntries(), this.leafId, this.byId);
 	}
 
@@ -1518,6 +1600,7 @@ export class SessionManager {
 	 * change the leaf pointer. Entries cannot be modified or deleted.
 	 */
 	getEntries(): SessionEntry[] {
+		// 将fileEntries里面除了sessionHeader这个元素，其余的都返回
 		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
 	}
 

@@ -146,14 +146,17 @@ export function calculateContextTokens(usage: Usage): number {
  * Skips aborted, error, and all-zero usage messages as they don't have valid usage data.
  */
 function getAssistantUsage(msg: AgentMessage): Usage | undefined {
+	// 如果是ai消息且里面存在usage属性的话
 	if (msg.role === "assistant" && "usage" in msg) {
 		const assistantMsg = msg as AssistantMessage;
+		// 如果消息里面的stopReason不是error或者aborted，且存在usage，且计算出来的token大于0
 		if (
 			assistantMsg.stopReason !== "aborted" &&
 			assistantMsg.stopReason !== "error" &&
 			assistantMsg.usage &&
 			calculateContextTokens(assistantMsg.usage) > 0
 		) {
+			// 返回ai消息里面的usage
 			return assistantMsg.usage;
 		}
 	}
@@ -182,6 +185,7 @@ export interface ContextUsageEstimate {
 }
 
 function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; index: number } | undefined {
+	// 从后往前找，找到第一个有usage的ai message停止，返回消息里面的usage对象以及数组下标
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const usage = getAssistantUsage(messages[i]);
 		if (usage) return { usage, index: i };
@@ -194,11 +198,14 @@ function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; in
  * If there are messages after the last usage, estimate their tokens with estimateTokens.
  */
 export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEstimate {
+	// 获取最后一个带有usage的ai message里面的usage属性
 	const usageInfo = getLastAssistantUsageInfo(messages);
 
+	// 如果usageInfo不存在，遍历整个messages数组来估算token使用量
 	if (!usageInfo) {
 		let estimated = 0;
 		for (const message of messages) {
+			// 这个方法里面就是针对不同类型的message，计算所携带内容的字节数
 			estimated += estimateTokens(message);
 		}
 		return {
@@ -209,12 +216,15 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 		};
 	}
 
+	// 通过usage计算出使用的token数量
 	const usageTokens = calculateContextTokens(usageInfo.usage);
 	let trailingTokens = 0;
+	// 然后预估最后一个带usage的ai message之后的其他消息使用的token数量
 	for (let i = usageInfo.index + 1; i < messages.length; i++) {
 		trailingTokens += estimateTokens(messages[i]);
 	}
 
+	// 然后构建对象返回
 	return {
 		tokens: usageTokens + trailingTokens,
 		usageTokens,
@@ -228,10 +238,13 @@ export function estimateProjectedContextTokens(
 	projection: SessionProjection,
 	branchEntries: SessionEntry[],
 ): ContextUsageEstimate {
+	// 根据会话投影里面的messages数组预估token使用量
 	const estimate = estimateContextTokens(projection.messages);
+	// 如果返回结果里面包含了lastUsageIndex，说明是找到了带usage的ai message
 	if (estimate.lastUsageIndex !== null) {
 		let projectedMessageIndex = 0;
 		let usageEntryId: string | undefined;
+		// 遍历会话投影里面的原始entries，找到那个lastUsageIndex这条消息对应的sourceEntry的id
 		for (const entry of projection.entries) {
 			const nextMessageIndex = projectedMessageIndex + entry.messages.length;
 			if (estimate.lastUsageIndex < nextMessageIndex) {
@@ -241,18 +254,23 @@ export function estimateProjectedContextTokens(
 			projectedMessageIndex = nextMessageIndex;
 		}
 
+		// 根据sourceEntry的id找出其在整个branchEntries数组里面的下标
 		const usageEntryIndex = usageEntryId ? branchEntries.findIndex((entry) => entry.id === usageEntryId) : -1;
 		let latestInvalidatingEntryIndex = -1;
+		// 反向遍历branchEntries数组
 		for (let i = branchEntries.length - 1; i >= 0; i--) {
 			const entry = branchEntries[i];
+			// 如果遇到context_edit或者compaction类型的entry，获取其下标后跳出循环
 			if (entry.type === "context_edit" || entry.type === "compaction") {
 				latestInvalidatingEntryIndex = i;
 				break;
 			}
 		}
+		// 如果这个涵盖usage对象的entry的下标在最新的无效下标之后，说明这个token用量是可信的，直接返回
 		if (usageEntryIndex > latestInvalidatingEntryIndex) return estimate;
 	}
 
+	// 否则，遍历会话投影里面的所有messages，对使用的token进行预估后返回
 	const currentSystem = getCurrentSystemMessage(projection.messages);
 	let tokens = currentSystem ? estimateTokens(currentSystem) : 0;
 	for (const message of projection.messages) {
@@ -265,7 +283,10 @@ export function estimateProjectedContextTokens(
  * Check if compaction should trigger based on context usage.
  */
 export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
+	// 如果压缩配置没有打开，直接返回false
 	if (!settings.enabled) return false;
+	// 否则查看当前上下文的token数量 是否 已经大于了 模型上下文窗口 - 配置中要保留的token数量
+	// 这个reserveTokens是给下一轮llm的输出等场景预留的，如果不预留的话，当超过contextWindow再压缩，可能会出现某一次没有token余量来接收llm的输出
 	return contextTokens > contextWindow - settings.reserveTokens;
 }
 
@@ -873,21 +894,27 @@ export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
 ): CompactionPreparation | undefined {
+	// 如果发送传入的entries数组里面最后一个entry已经是compaction类型的了，直接返回，不需要再compact了
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
 	}
 
+	// 构建会话投影
 	const projection = buildSessionProjection(pathEntries);
+	// 拿到投影的entries集合，这个和传入的pathEntries不是一个东西
 	const projectedEntries = projection.entries;
 	const sourceEntries = projectedEntries.map((entry) => entry.sourceEntry);
 	// The newest compaction is projected first. Older compaction entries can still
 	// occur in its retained raw range, but their projected contribution is empty.
+	// 从投影中拿到最新的压缩entry，在投影里面最新的压缩entry是排在最前面的
+	// 更老的压缩entry可以存在于后续的entry列表中，但是它们都不携带任何messages了，对投影的贡献等于没有
 	const prevCompactionIndex = projectedEntries.findIndex(
 		(entry) => entry.sourceEntry.type === "compaction" && entry.messages.length > 0,
 	);
 
 	let previousSummary: string | undefined;
 	let boundaryStart = 0;
+	// 如果存在以前的压缩entry，获取它的summary内容
 	if (prevCompactionIndex >= 0) {
 		previousSummary = (projectedEntries[prevCompactionIndex].sourceEntry as CompactionEntry).summary;
 		// The canonical projection has already selected the previous compaction's retained tail.

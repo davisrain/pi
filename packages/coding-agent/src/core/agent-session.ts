@@ -724,22 +724,30 @@ export class AgentSession {
 
 	/** Whether `projection`, the current session projection, exceeds the compaction threshold of `model`. */
 	private _exceedsCompactionThreshold(model: Model<any>, projection: SessionProjection): boolean {
+		// 如果模型的上下文窗口小于等于0的话，不压缩
 		if (model.contextWindow <= 0) return false;
+		// 根据当前token使用量、模型上下文窗口、压缩配置来决定是否需要压缩
 		return shouldCompact(
+			// 根据会话投影预估token使用量
 			estimateProjectedContextTokens(projection, this.sessionManager.getBranch()).tokens,
 			model.contextWindow,
+			// 从配置中获取压缩相关的配置信息
 			this.settingsManager.getCompactionSettings(this.model),
 		);
 	}
 
 	private async _compactBeforeNextAssistantResponse(context: AgentContext): Promise<AgentContext> {
+		// 构建会话投影，里面包含了当前llm可以读取到的entries数组，对应的messages数组，model和thinkingLevel等信息
 		const projection = this.sessionManager.buildSessionProjection();
 		// A virtual selection is checked in prepareRequest, against the model the request is routed to.
+		// 如果发现当前agent的state里面持有的是虚拟模型，或者没有超过上下文的阈值，不压缩就返回
 		const model = this.model;
 		if (!model || isVirtualModel(model) || !this._exceedsCompactionThreshold(model, projection)) {
 			return { ...context, messages: projection.messages };
 		}
+		// 压缩
 		await this._runAutoCompaction("threshold", false);
+		// 返回压缩后的消息列表
 		return { ...context, messages: this.sessionManager.buildSessionProjection().messages };
 	}
 
@@ -855,12 +863,15 @@ export class AgentSession {
 	}
 
 	private _installAgentNextTurnRefresh(): void {
+		// 先将agent自带的方法声明出来，如果不存在withContext的，就用prepareNextTurn来包装
 		const previousPrepareNextTurnWithContext =
 			this.agent.prepareNextTurnWithContext ??
 			(this.agent.prepareNextTurn
 				? async (_turn: PrepareNextTurnContext, signal?: AbortSignal) => await this.agent.prepareNextTurn?.(signal)
 				: undefined);
+		// 然后通过装饰器模式在原始agent的方法外层添加逻辑，并重新赋值给agent
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
+			// 在下一次请求llm之前尝试压缩上下文，主要是压缩消息列表
 			const context = await this._compactBeforeNextAssistantResponse(turn.context);
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.({ ...turn, context }, signal);
 			const nextContext = previousSnapshot?.context ?? context;
@@ -3010,6 +3021,7 @@ export class AgentSession {
 	 * @returns Whether the post-run loop should call `agent.continue()`
 	 */
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+		// 获取模型和压缩配置
 		const model = this.model;
 		const settings = this.settingsManager.getCompactionSettings(model);
 		let abortController: AbortController | undefined;
@@ -3018,20 +3030,28 @@ export class AgentSession {
 		let cancelledByExtension = false;
 
 		try {
+			// 如果模型不存在，直接返回false
 			if (!model) {
 				return false;
 			}
 
+			// 获取当前会话要发送给llm的entry数组
 			const pathEntries = this.sessionManager.getBranch();
+			// 准备压缩，判断要压缩的entry的切点位置等
 			const preparation = prepareCompaction(pathEntries, settings);
+			// 如果返回的undefined，返回false
 			if (!preparation) {
 				return false;
 			}
 
+			// 创建取消的开关
 			abortController = new AbortController();
 			this._autoCompactionAbortController = abortController;
+			// 设置开始标志，这个标志决定失败时要不要发compaction_end事件
 			started = true;
+			// 发送agentSession事件给注册的eventListener们
 			this._emit({ type: "compaction_start", reason });
+			// 判断是否已经被取消了
 			abortController.signal.throwIfAborted();
 
 			let extensionCompaction: CompactionResult | undefined;

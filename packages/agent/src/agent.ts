@@ -188,7 +188,9 @@ type ActiveRun = {
 export class Agent {
 	private _state: MutableAgentState;
 	private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
+	// 引导消息队列，agent在每次执行完tool之后检查该队列，如果发现不为空，将剩余的tool丢掉，使用引导消息继续调用llm
 	private readonly steeringQueue: PendingMessageQueue;
+	// 跟进消息队列，只有当agent发现没有tool执行的时候，才会查看这个队列获取消息
 	private readonly followUpQueue: PendingMessageQueue;
 
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
@@ -370,13 +372,17 @@ export class Agent {
 	/** Start a new prompt from text, a single message, or a batch of messages. */
 	async prompt(message: AgentMessage | AgentMessage[]): Promise<void>;
 	async prompt(input: string, images?: ImageContent[]): Promise<void>;
+	// 触发一次agent loop的入口方法
 	async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageContent[]): Promise<void> {
+		// 如果当前agent已经在跑了，报错，只能使用steer或者fllowup来添加消息到队列中
 		if (this.activeRun) {
 			throw new Error(
 				"Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
 			);
 		}
+		// 规范化prompt的输入，将字符串、图片信息都转换成Message数组的形式返回
 		const messages = this.normalizePromptInput(input, images);
+		// 执行具体的prompt处理逻辑
 		await this.runPromptMessages(messages);
 	}
 
@@ -414,18 +420,22 @@ export class Agent {
 		input: string | AgentMessage | AgentMessage[],
 		images?: ImageContent[],
 	): AgentMessage[] {
+		// 如果input已经是数组了，直接返回
 		if (Array.isArray(input)) {
 			return input;
 		}
 
+		// 如果input不是直接输入的字符串，包装成数组返回
 		if (typeof input !== "string") {
 			return [input];
 		}
 
+		// 将输入的字符串包装成TextContent，然后将ImageContent也放入到content数组中
 		const content: Array<TextContent | ImageContent> = [{ type: "text", text: input }];
 		if (images && images.length > 0) {
 			content.push(...images);
 		}
+		// 根据content构建一个UserMessage的数组返回
 		return [{ role: "user", content, timestamp: Date.now() }];
 	}
 
@@ -436,8 +446,11 @@ export class Agent {
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoop(
 				messages,
+				// 创建agent loop要使用的上下文，里面就只有messages快照和tools快照
 				this.createContextSnapshot(),
+				// 根据options创建出agent loop要使用的config
 				this.createLoopConfig(options),
+				// 事件处理函数，在agent执行过程中可能会发送各种事件，该函数就是具体的处理逻辑
 				(event) => this.processEvents(event),
 				signal,
 				this.streamFunction,
@@ -465,6 +478,7 @@ export class Agent {
 	}
 
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
+		// 这里判断是否跳过初始化阶段的steer消息的拉取
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		return {
 			model: this._state.model,
@@ -481,7 +495,9 @@ export class Agent {
 			afterToolCall: this.afterToolCall,
 			finishTurn: this.finishTurn,
 			prepareRequest: this.prepareRequest,
+			// 这个方法是在内部turn循环中准备下一次turn调用的
 			prepareNextTurn:
+				// agent里面的这两个方法是在构造agent的时候由AgentOptions传入的
 				this.prepareNextTurnWithContext || this.prepareNextTurn
 					? async (context) => {
 							if (this.prepareNextTurnWithContext) {
@@ -493,13 +509,17 @@ export class Agent {
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
 			getApiKey: this.getApiKey,
+			// 获取steering message的方法
 			getSteeringMessages: async () => {
+				// 如果是跳过初始化steer消息的拉取，直接返回空数组，然后将skip标志设置为false，这样下次就不会跳过了
 				if (skipInitialSteeringPoll) {
 					skipInitialSteeringPoll = false;
 					return [];
 				}
+				// 从队列中取出消息数组返回
 				return this.steeringQueue.drain();
 			},
+			// 获取follow-up messages的方法
 			getFollowUpMessages: async () => this.followUpQueue.drain(),
 		};
 	}
@@ -509,18 +529,24 @@ export class Agent {
 			throw new Error("Agent is already processing.");
 		}
 
+		// 创建一个abortController
 		const abortController = new AbortController();
 		let resolvePromise = () => {};
+		// 创建一个Promise，并且将这个Promise的resolve函数给resolvePromise，用于将这个Promise设置为fulfilled状态
+		// 这样做的目的是将resolve函数提取出来，以便别人来调用
 		const promise = new Promise<void>((resolve) => {
 			resolvePromise = resolve;
 		});
+		// 用上述三个元素创建一个activeRun对象，表示agent处于run状态，并且也留下了其他调用方完成或者中断promise的句柄
 		this.activeRun = { promise, resolve: resolvePromise, abortController };
 
+		// 修改agent持有的_state状态对象的属性
 		this._state.isStreaming = true;
 		this._state.streamingMessage = undefined;
 		this._state.errorMessage = undefined;
 
 		try {
+			// 执行实际的executor，也就是agent loop的逻辑
 			await executor(abortController.signal);
 		} catch (error) {
 			await this.handleRunFailure(error, abortController.signal.aborted);
@@ -548,6 +574,7 @@ export class Agent {
 	}
 
 	private finishRun(): void {
+		// 设置agentState状态 以及 调用activeRun的resolve方法，将对应的Promise设置为fulfilled
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();
@@ -564,19 +591,20 @@ export class Agent {
 	 */
 	private async processEvents(event: AgentEvent): Promise<void> {
 		switch (event.type) {
+			// 将事件里面带有的message放入到_state里面的streamingMessage字段
 			case "message_start":
 				this._state.streamingMessage = event.message;
 				break;
-
+			// 同上
 			case "message_update":
 				this._state.streamingMessage = event.message;
 				break;
-
+			// 将_state里面的streamingMessage设置为undefined，并且将事件里面的message放到state的message集合中
 			case "message_end":
 				this._state.streamingMessage = undefined;
 				this._state.messages.push(event.message);
 				break;
-
+			// 维护state里面pendingToolCalls这个数组，将要待执行的toolCallId进行新增或者删除
 			case "tool_execution_start": {
 				const pendingToolCalls = new Set(this._state.pendingToolCalls);
 				pendingToolCalls.add(event.toolCallId);
@@ -590,22 +618,26 @@ export class Agent {
 				this._state.pendingToolCalls = pendingToolCalls;
 				break;
 			}
-
+			// 一个 turn 指的是：一次请求模型，得到一条助手回复，再执行这条回复里的所有工具调用；一次prompt叫做run，run里面可能会有多个turn。
+			// 如果事件里面带的message是ai输出的，并且存在errorMessage，将其维护进state的errorMessage中
 			case "turn_end":
 				if (event.message.role === "assistant" && event.message.errorMessage) {
 					this._state.errorMessage = event.message.errorMessage;
 				}
 				break;
-
+			// 表示一个agent loop结束了，将streamingMessage设置为undefined
 			case "agent_end":
 				this._state.streamingMessage = undefined;
 				break;
 		}
 
+		// 获取当前activeRun里面的abortController的signal
 		const signal = this.activeRun?.abortController.signal;
+		// 如果不存在，报错
 		if (!signal) {
 			throw new Error("Agent listener invoked outside active run");
 		}
+		// 遍历所有的listener，推送事件和signal给listener
 		for (const listener of this.listeners) {
 			await listener(event, signal);
 		}

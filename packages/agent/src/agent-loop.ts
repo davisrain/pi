@@ -107,21 +107,28 @@ export async function runAgentLoop(
 	signal: AbortSignal | undefined,
 	streamFn: StreamFn,
 ): Promise<AgentMessage[]> {
+	// 在prompts里面声明tools的变化
 	const initialMessages = declareToolChanges(context, prompts);
+	// 复制消息数组，todo 这里是为了干嘛？
 	const newMessages: AgentMessage[] = [...initialMessages];
+	// 将prompts里面的消息和context里面的messages合并为新数组，然后设置进新创建的AgentContext中
 	const currentContext: AgentContext = {
 		...context,
 		messages: [...context.messages, ...initialMessages],
 	};
 
+	// 发送agent_start的事件
 	await emit({ type: "agent_start" });
+	// 发送turn_start的事件
 	await emit({ type: "turn_start" });
+	// 然后遍历所有的prompts传入的消息，依次发送message_start和message_end事件
 	for (const message of initialMessages) {
 		await emit({ type: "message_start", message });
 		await emit({ type: "message_end", message });
 	}
-
+	// 执行具体的loop逻辑
 	await runLoop(currentContext, newMessages, config, signal, emit, streamFn ?? getDefaultStreamFn());
+	// 最后返回newMessages这个消息数组
 	return newMessages;
 }
 
@@ -173,17 +180,24 @@ async function runLoop(
 	let lastCompletedTurn: PrepareNextTurnContext | undefined;
 	let explicitContinuation = false;
 	// Check for steering messages at start (user may have typed while waiting)
+	// 在开始的时候检查是否存在steer messages
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
 	// Outer loop: continues when queued follow-up messages arrive after agent would stop
+	// 外层循环，如果存在follow-up消息的话，loop会继续
 	while (true) {
+		// 进来先将hasMoreToolCalls设置为true，确保第一次可以进行内层loop
 		let hasMoreToolCalls = true;
 
 		// Inner loop: process tool calls and steering messages
+		// 内存循环，每次循环是一次turn，每次turn都会调用llm
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
 			let preparedMessages: AgentMessage[] = [];
+			// 如果lastCompletedTurn存在，说明之前已经执行过一次turn了
 			if (lastCompletedTurn) {
+				// 根据最后一次完成的turn准备下一次turn的snapshot，这里可以做很多事情，比如compact
 				const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
+				// 将上下文和配置更新为nextTurnSnapshot里面带有的
 				if (nextTurnSnapshot) {
 					currentContext = nextTurnSnapshot.context ?? currentContext;
 					preparedMessages = nextTurnSnapshot.messages ?? [];
@@ -201,21 +215,29 @@ async function runLoop(
 				// Preparation can be long-running (for example, compaction). Pick up steering
 				// queued while it ran. Only poll again if the earlier poll returned nothing;
 				// otherwise one-at-a-time mode would deliver two messages in this turn.
+
+				// 准备阶段可以时间很久，如果前面没有获取到steering messages，这里再尝试获取一次
 				if (pendingMessages.length === 0) {
 					pendingMessages = (await config.getSteeringMessages?.()) || [];
 				}
+				// 发送turn_start的事件
 				await emit({ type: "turn_start" });
 			}
 
 			// Process prepared and queued messages before the next assistant response.
+			// 在下一次请求llm之前先处理pending messages和prepared messages
 			for (const message of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {
 				await emit({ type: "message_start", message });
 				await emit({ type: "message_end", message });
+				// 将message也添加到当前上下文里面的messages数组中
 				currentContext.messages.push(message);
+				// 并且也添加进newMessages数组中
 				newMessages.push(message);
 			}
+			// 将pending messages引用设置为空数组，以便下一次turn再获取新的steering messages
 			pendingMessages = [];
 
+			// 调用config的prepareRequest这个钩子函数来对要调用llm的request做处理
 			const requestUpdate = await config.prepareRequest?.(
 				{
 					context: currentContext,
@@ -224,8 +246,11 @@ async function runLoop(
 				},
 				signal,
 			);
+			// 如果requestUpdate存在，说明请求被更新了，那么就需要更新对应的currentContext和config这些请求需要用到的对象
 			if (requestUpdate) {
+				// 如果返回了更新后的context，用于替换本次turn要用的currentContext，否则还是使用当前的
 				currentContext = requestUpdate.context ?? currentContext;
+				// 尝试更新本次turn要用到的config中的model和reasoning属性
 				config = {
 					...config,
 					model: requestUpdate.model ?? config.model,
@@ -239,66 +264,90 @@ async function runLoop(
 			}
 
 			// Stream assistant response
+			// 这里就是实际的调用llm的地方，并返回ai message
 			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFunction);
+			// 将ai message放入newMessages数组中
 			newMessages.push(message);
 
+			// 如果message中存在stopReason，即出现异常或者abort了
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				// 维护一个最后完成的turn对象
 				lastCompletedTurn = {
 					message,
 					toolResults: [],
 					context: currentContext,
 					newMessages,
 				};
+				// 调用config的finishTurn函数
 				await config.finishTurn?.(lastCompletedTurn, signal);
+				// 然后发送turn_end和agent_end事件后返回
 				await emit({ type: "turn_end", message, toolResults: [] });
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}
 
 			// Check for tool calls
+			// 如果正常返回了消息，检查是否带有toolCalls
 			const toolCalls = message.content.filter((c) => c.type === "toolCall");
 
 			const toolResults: ToolResultMessage[] = [];
 			hasMoreToolCalls = false;
+			// 如果存在toolCalls
 			if (toolCalls.length > 0) {
 				// A "length" stop means the output was cut off by the token limit, so
 				// every tool call in the message may carry truncated arguments. Fail
 				// them all instead of executing potentially borked calls.
+				// 如果是因为length停止的，说明是超过token限制了，那么这些tool call可能会携带着被截断的参数，
+				// 没有必要去调用，将这些tool call都设置为失败。
+				// 否则，正常调用tool call
 				const executedToolBatch =
 					message.stopReason === "length"
 						? await failToolCallsFromTruncatedMessage(toolCalls, emit)
 						: await executeToolCalls(currentContext, message, config, signal, emit);
+				// 将tool call的调用结果添加进toolResults中
 				toolResults.push(...executedToolBatch.messages);
+				// 查看是否调用结束了，即是否还有更多的tool call调用
 				hasMoreToolCalls = !executedToolBatch.terminate;
 
+				// 将tool call调用结果都放入上下文和newMessages中
 				for (const result of toolResults) {
 					currentContext.messages.push(result);
 					newMessages.push(result);
 				}
 			}
 
+			// 构造lastCompletedTurn对象
 			lastCompletedTurn = {
 				message,
 				toolResults,
 				context: currentContext,
 				newMessages,
 			};
+			// 调用config的finishTurn决定是否还要继续调用下一次turn
 			const decision = await config.finishTurn?.(lastCompletedTurn, signal);
+			// 发送turn end的事件
 			await emit({ type: "turn_end", message, toolResults });
 
+			// 如果决定是end，发送agent_end的事件
 			if (decision?.action === "end") {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}
 
+			// 如果决定是continue，将explicitContinuation设置为true，表示是下一次turn循环是显示延续的
 			explicitContinuation = decision?.action === "continue";
+			// 尝试去获取steering messages
 			pendingMessages = (await config.getSteeringMessages?.()) || [];
+			// 如果还有更多的tool_call 或者 存在steering message，那么将explicitContinuation设置为false，表示下一次turn不是显示延续的
 			if (hasMoreToolCalls || pendingMessages.length > 0) {
 				explicitContinuation = false;
 			}
+			// 继续执行下一次turn
 		}
 
 		// Agent would stop here. Check for follow-up messages.
+		// 当没有更多的tool call或者没有steering message的时候，内层的turn循环结束。agent也即将停止。
+		// 此时去查看是否有followUp messages，如果存在的话，将其赋值给pending messages后continue继续内部循环
 		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
 		if (followUpMessages.length > 0) {
 			// Set as pending so inner loop processes them
@@ -314,9 +363,10 @@ async function runLoop(
 		}
 
 		// No more messages, exit
+		// 没有任何follow-up消息了，结束循环
 		break;
 	}
-
+	// 发送agent_end事件
 	await emit({ type: "agent_end", messages: newMessages });
 }
 
@@ -332,33 +382,50 @@ async function runLoop(
  */
 function declareToolChanges(context: AgentContext, pendingMessages: AgentMessage[]): AgentMessage[] {
 	let systemIndex = -1;
+	// 从后往前找到SystemMessage的数组下标
 	for (let i = pendingMessages.length - 1; i >= 0; i--) {
 		if (pendingMessages[i].role === "system") {
 			systemIndex = i;
 			break;
 		}
 	}
+	// 获取到SystemMessage，当然有可能不存在
 	const pending = pendingMessages[systemIndex] as SystemMessage | undefined;
+	// 如果存在的话，使用map对message数组里面的SystemMessage做处理，其他元素不变；
+	// 这里做的处理只是将SystemMessage里面的toolsAdded和toolsRemoved换成空数组了
+	// 如果不存在，直接返回原数组
 	const baseline = pending
 		? pendingMessages.map((message, index) =>
 				index === systemIndex ? withToolChanges(pending, NO_CHANGES) : message,
 			)
 		: pendingMessages;
 	const changes = getToolStateChanges(
+		// 将context里面的messages和 baseline里面的消息合并，然后根据消息列表计算出当前能使用的工具集合
 		getCurrentTools([...context.messages, ...baseline]),
+		// 将context中的工具集合遍历转换成要传递给llm的工具声明，丢弃掉了execute等函数属性
+		// 其中??表示如果前面的变量为null或者undefined，默认使用[]空数组
 		(context.tools ?? []).map(toToolDeclaration),
 	);
+	// 如果没有发生任何变更，将unchanged设置为true
 	const unchanged = changes.toolsAdded.length === 0 && changes.toolsRemoved.length === 0;
 
+	// 如果传入的pendingMessages存在SystemMessage
 	if (pending) {
 		// Keep the caller's message object when it already declares no tool changes.
+		// 如果tools没有发生变化，且传入的SystemMessage的toolsAdded和toolsRemoved都为空，直接返回pendingMessages
 		if (unchanged && !pending.toolsAdded?.length && !pending.toolsRemoved?.length) return pendingMessages;
+		// 否则，将changes应用到SystemMessage中返回
 		return baseline.map((message, index) => (index === systemIndex ? withToolChanges(pending, changes) : message));
 	}
+	// 如果不存在SystemMessage，没有变化直接返回
 	if (unchanged) return pendingMessages;
+	// 创建一个SystemMessage出来，并且将changes应用进去
 	const update = withToolChanges({ role: "system", content: "", timestamp: Date.now() }, changes);
+	// 找到第一个不等于system的Message的位置
 	const insertIndex = pendingMessages.findIndex((message) => message.role !== "system");
+	// 如果没有找到，那么插入位置直接放在最后，否则，放在第一个不等于SystemMessage的消息的前面
 	const index = insertIndex === -1 ? pendingMessages.length : insertIndex;
+	// 将构建好的SystemMessage插入进去
 	return [...pendingMessages.slice(0, index), update, ...pendingMessages.slice(index)];
 }
 
@@ -366,10 +433,17 @@ const NO_CHANGES: ToolStateChanges = { toolsAdded: [], toolsRemoved: [] };
 
 /** Copy a system message with its tool fields replaced by `changes`; empty lists omit the field. */
 function withToolChanges(message: SystemMessage, { toolsAdded, toolsRemoved }: ToolStateChanges): SystemMessage {
+	// 将SystemMessage里面的toolsAdded属性赋值给_added变量
+	// 将SystemMessage里面的toolsRemoved属性赋值给_removed变量
+	// 然后将剩下的字段赋值给...rest
 	const { toolsAdded: _added, toolsRemoved: _removed, ...rest } = message;
+	// 新建一个SystemMessage对象，将...rest保留，然后使用传入的toolsAdded和toolsRemoved来替换原来SystemMessage对应的内容
 	return {
 		...rest,
+		// 这里是用了一个三元表达式，然后{ toolsAdded }是对象简写，等于{ toolsAdded: toolsAdded}
+		// 然后在前面加...，表示将刚才声明的对象展开，合并到新创建的SystemMessage对象中
 		...(toolsAdded.length > 0 ? { toolsAdded } : {}),
+		// 同理
 		...(toolsRemoved.length > 0 ? { toolsRemoved } : {}),
 	};
 }

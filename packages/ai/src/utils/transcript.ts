@@ -56,12 +56,17 @@ export function withoutInitialSystemMessage(messages: Message[]): Message[] {
 
 /** Resolve the tools available after applying every transcript delta in order. */
 export function getCurrentTools(messages: TranscriptMessages): Tool[] {
+	// 创建一个工具的map
 	const tools = new Map<string, Tool>();
 	for (const message of messages) {
+		// 如果不是SystemMessage的话，跳过
 		if (!isSystemMessage(message)) continue;
+		// 如果是SystemMessage，遍历message里面的toolsRemoved属性，依次从map中删除
 		for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
+		// 遍历message里面的toolsAdded，依次添加进map
 		for (const tool of message.toolsAdded ?? []) tools.set(tool.name, tool);
 	}
+	// 然后返回当前仍存在的工具列表
 	return [...tools.values()];
 }
 
@@ -74,18 +79,24 @@ export function getCurrentSystemMessage(messages: TranscriptMessages): SystemMes
 	const content: string[] = [];
 	const sections = new Map<string, string>();
 	let timestamp: number | undefined;
+	// 遍历整个消息列表
 	for (const message of messages) {
 		if (!isSystemMessage(message)) continue;
+		// 找出是systemMessage的部分
 		timestamp ??= message.timestamp;
+		// 汇总content属性里面的所有内容
 		const text = contentText(message.content);
 		if (text.length > 0) content.push(text);
+		// 将所有systemMessage里面的sections统计并保留最新的内容
 		for (const [name, value] of Object.entries(message.sections ?? {})) {
 			if (value === null) sections.delete(name);
 			else sections.set(name, value);
 		}
 	}
+	// 统计所有systemMessage里面的tool的变化，保留最后的tools数组
 	const tools = getCurrentTools(messages);
 	if (timestamp === undefined && tools.length === 0) return undefined;
+	// 构建最终状态的SystemMessage
 	return {
 		role: "system",
 		content: content.join("\n\n"),
@@ -148,8 +159,12 @@ export interface ToolStateChanges {
 
 /** Compare two complete tool states. A changed definition is a removal followed by an addition. */
 export function getToolStateChanges(previous: readonly Tool[], current: readonly Tool[]): ToolStateChanges {
+	// 将以前和现在的两个Tool数组转换成map格式
 	const previousTools = new Map(previous.map((tool) => [tool.name, tool]));
 	const currentTools = new Map(current.map((tool) => [tool.name, tool]));
+	// 然后依次计算出当前Tool数组中有哪些是以前没有的工具，放入toolsAdded
+	// 计算出以前Tool数组中有哪些是当前没有的工具，放入toolsRemoved中
+	// 构建出ToolStateChanges对象返回
 	return {
 		toolsAdded: current
 			.filter((tool) => {
