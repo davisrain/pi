@@ -353,6 +353,7 @@ function loadSkillFromFile(
  * (they can only be invoked explicitly via /skill:name commands).
  */
 export function formatSkillsForPrompt(skills: Skill[], fileReadTool: "read" | "bash" = "read"): string {
+	// 过滤掉那些禁止模型调用的skill，这些skill只能显示调用
 	const visibleSkills = skills.filter((s) => !s.disableModelInvocation);
 
 	if (visibleSkills.length === 0) {
@@ -369,6 +370,7 @@ export function formatSkillsForPrompt(skills: Skill[], fileReadTool: "read" | "b
 		"<available_skills>",
 	];
 
+	// 将skill的name description path添加进skill section中
 	for (const skill of visibleSkills) {
 		lines.push("  <skill>");
 		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
@@ -378,7 +380,7 @@ export function formatSkillsForPrompt(skills: Skill[], fileReadTool: "read" | "b
 	}
 
 	lines.push("</available_skills>");
-
+	// 整体使用available_skills来进行包装
 	return lines.join("\n");
 }
 

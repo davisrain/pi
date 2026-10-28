@@ -1002,14 +1002,21 @@ export class ModelRuntime implements Models {
 			state?: unknown;
 		},
 	): Promise<ModelRoute> {
+		// 拼接模型的名称
 		const name = `Virtual model ${model.provider}/${model.id}`;
+		// 从virtualModels里面根据provider和id获取出对应的模型对象
 		const virtual = this.virtualModels.get(model.provider)?.get(model.id);
+		// 如果不存在，说明没有注册过，报错
 		if (!virtual) throw new Error(`${name} is not registered.`);
 		const { failed, ...request } = options;
+		// 从消息列表中获取最后一个ai message
 		const latest = findLatestResponse(messages);
+		// 如果存在最后一个ai message，根据provider和modelId获取真实的物理模型
 		const previousModel = latest && this.getPhysicalModel(latest.provider, latest.model);
 		// A failed routing attempt names the virtual model; there is no physical request to report.
+		// 根据失败消息获取失败消息返回的物理模型
 		const failedModel = failed && this.getPhysicalModel(failed.provider, failed.model);
+		// 使用virtualmodel的路由函数获取到最终的要使用的模型
 		const route = await virtual.route({
 			...request,
 			model,
@@ -1017,15 +1024,20 @@ export class ModelRuntime implements Models {
 			failed: failedModel && failed && { model: failedModel, thinkingLevel: failed.thinkingLevel, message: failed },
 			messages,
 		});
+		// 拿到物理模型
 		const target = this.getPhysicalModel(route.model.provider, route.model.id);
+		// 如果路由到的模型不在物理模型里面，报错
 		const routed = `${name} routed to ${route.model.provider}/${route.model.id}`;
 		if (!target) throw new Error(`${routed}, which is not a physical model.`);
+		// 如果没有权限了，报错
 		if (!this.hasConfiguredAuth(target.provider)) throw new Error(`${routed}, which has no credentials.`);
+		// 返回最终路由到的模型
 		return { model: target, thinkingLevel: clampThinkingLevel(target, route.thinkingLevel), state: route.state };
 	}
 
 	/** A catalog chat model that is not virtual. */
 	getPhysicalModel(providerId: string, modelId: string): Model<Api> | undefined {
+		// 根据providerId和modelId获取真实的物理模型，如果是虚拟模型，返回undefined
 		const model = this.models.getModel(providerId, modelId);
 		return model && !isVirtualModel(model) ? model : undefined;
 	}

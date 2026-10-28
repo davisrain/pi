@@ -89,6 +89,7 @@ export function getCurrentSystemMessage(messages: TranscriptMessages): SystemMes
 		if (text.length > 0) content.push(text);
 		// 将所有systemMessage里面的sections统计并保留最新的内容
 		for (const [name, value] of Object.entries(message.sections ?? {})) {
+			// 如果section的value为null，删除这个section
 			if (value === null) sections.delete(name);
 			else sections.set(name, value);
 		}
@@ -99,8 +100,11 @@ export function getCurrentSystemMessage(messages: TranscriptMessages): SystemMes
 	// 构建最终状态的SystemMessage
 	return {
 		role: "system",
+		// 最终的拼接完成的content
 		content: content.join("\n\n"),
+		// 构建出sections
 		...(sections.size > 0 ? { sections: Object.fromEntries(sections) } : {}),
+		// 构建出最终要添加的工具列表
 		...(tools.length > 0 ? { toolsAdded: tools } : {}),
 		timestamp: timestamp ?? 0,
 	};

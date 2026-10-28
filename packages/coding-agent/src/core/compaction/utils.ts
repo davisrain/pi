@@ -30,16 +30,21 @@ export function createFileOps(): FileOperations {
 export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOperations): void {
 	if (message.role === "toolResult") {
 		// Calls made from codemode scripts are recorded on the script's result.
+		// 从tool result里面嵌套的tool calls里解析文件操作
 		for (const call of message.nestedCalls?.calls ?? []) addFileOp(call.name, call.arguments, fileOps);
 		return;
 	}
+	// 如果不是ai消息，直接返回
 	if (message.role !== "assistant") return;
+	// 如果ai消息里面没有content或者content不是数组，也返回
 	if (!("content" in message) || !Array.isArray(message.content)) return;
 
+	// 遍历ai消息里面的content数组
 	for (const block of message.content) {
 		if (typeof block !== "object" || block === null) continue;
 		if (!("type" in block) || block.type !== "toolCall") continue;
 		if (!("arguments" in block) || !("name" in block)) continue;
+		// 找到toolcall类型的content，解析文件操作
 		addFileOp(block.name, block.arguments as Record<string, unknown> | undefined, fileOps);
 	}
 }

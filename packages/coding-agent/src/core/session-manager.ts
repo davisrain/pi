@@ -1348,8 +1348,11 @@ export class SessionManager {
 		usage?: Usage,
 	): string {
 		const timestamp = new Date().toISOString();
+		// 先拿当前会话的投影结果构建一份systemMessage
 		const systemMessage = getCurrentSystemMessage(this.buildSessionProjection().messages);
+		// 生成一个entry的id
 		const id = generateId(this.byId);
+		// 创建一个CompactionEntry，将各个属性都填入，特别是SystemMessage填入
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
 			id,
@@ -1363,6 +1366,7 @@ export class SessionManager {
 			fromHook,
 			...(systemMessage ? { systemMessage: { ...systemMessage, timestamp: new Date(timestamp).getTime() } } : {}),
 		};
+		// 添加到entries数组中
 		this._appendEntry(entry);
 		return entry.id;
 	}

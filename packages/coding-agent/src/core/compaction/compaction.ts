@@ -62,14 +62,18 @@ function extractFileOperations(
 	entries: SessionEntry[],
 	prevCompactionIndex: number,
 ): FileOperations {
+	// 创建一个FileOperations对象
 	const fileOps = createFileOps();
 
 	// Collect from previous compaction's details (if pi-generated)
+	// 如果前置的压缩消息存在
 	if (prevCompactionIndex >= 0) {
 		const prevCompaction = entries[prevCompactionIndex] as CompactionEntry;
+		// 如果前置的压缩是由pi生成的，而不是extension生成的
 		if (!prevCompaction.fromHook && prevCompaction.details) {
 			// fromHook field kept for session file compatibility
 			const details = prevCompaction.details as CompactionDetails;
+			// 将details里面的读取文件和修改文件的内容添加到fileOps里面
 			if (Array.isArray(details.readFiles)) {
 				for (const f of details.readFiles) fileOps.read.add(f);
 			}
@@ -80,6 +84,7 @@ function extractFileOperations(
 	}
 
 	// Extract from tool calls in messages
+	// 然后继续从消息数组的tool calls里面提取操作文件的内容
 	for (const msg of messages) {
 		extractFileOpsFromMessage(msg, fileOps);
 	}
@@ -370,6 +375,7 @@ export function estimateTokens(message: AgentMessage): number {
 }
 
 function isCutPointMessage(message: AgentMessage): boolean {
+	// 判断message的类型，只有某些类型的消息可以作为压缩的切点
 	switch (message.role) {
 		case "user":
 		case "assistant":
@@ -827,10 +833,12 @@ function findProjectedCutPoint(
 	keepRecentTokens: number,
 ): CutPointResult {
 	const cutPoints: number[] = [];
+	// 先从开始下标遍历到结束下标，统计可以作为切点的entry的下标
 	for (let i = startIndex; i < endIndex; i++) {
 		const entry = entries[i];
 		if (entry.sourceEntry.type !== "compaction" && entry.messages.some(isCutPointMessage)) cutPoints.push(i);
 	}
+	// 如果整个范围内没有可以作为切点的entry，直接返回startIndex
 	if (cutPoints.length === 0) {
 		return { firstKeptEntryIndex: startIndex, turnStartIndex: -1, isSplitTurn: false };
 	}
@@ -838,12 +846,19 @@ function findProjectedCutPoint(
 	let accumulatedTokens = 0;
 	let exceededBudget = false;
 	let cutIndex = cutPoints[0];
+	// 倒序遍历
 	for (let i = endIndex - 1; i >= startIndex; i--) {
+		// 将每个entry包含的messages的token估算并累加起来
 		const messageTokens = entries[i].messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+		// 如果这个entry对应的消息token为0的话，直接跳过
 		if (messageTokens === 0) continue;
+		// 将每个entry的token累加
 		accumulatedTokens += messageTokens;
+		// 如果累加的token超过了要保存的最近的token数量
 		if (accumulatedTokens >= keepRecentTokens) {
+			// 标识超过了预算
 			exceededBudget = true;
+			// 尝试去cutPoints里面查找，第一个大于当前i的切点的下标，如果没找到的话，使用最后一个切点
 			cutIndex = cutPoints.find((candidate) => candidate >= i) ?? cutPoints[cutPoints.length - 1];
 			break;
 		}
@@ -852,12 +867,17 @@ function findProjectedCutPoint(
 	// A recovery attempt and its omission edits are context-invisible after the last
 	// visible input. Advance only for a closed suffix containing an omitted assistant
 	// attempt; arbitrary metadata must not move the cut past unsent input.
+	// 从切点 + 1 的位置截取投影的entries数组
 	const suffix = entries.slice(cutIndex + 1, endIndex);
+	// 创建一个函数，用于判断这个entry里面的message对llm来说本质上是否是可见的
 	const isIntrinsicallyVisible = (entry: ProjectedSessionEntry): boolean =>
 		entry.sourceEntry.type !== "context_edit" && sessionEntryToContextMessages(entry.sourceEntry).length > 0;
+	// 创建一个函数，判断这个entry本质上可见的，但实际的messages的长度为0，说明对应的修改它的context_edit类型的entry的replacement为null
 	const isOmitted = (entry: ProjectedSessionEntry): boolean =>
 		isIntrinsicallyVisible(entry) && entry.messages.length === 0;
+	// 从suffix中找出这些 本质上可见但实际不可见的 entry的id
 	const omittedSuffixIds = new Set(suffix.filter(isOmitted).map((entry) => entry.sourceEntry.id));
+	// 判断suffix中是否存在replacement不为null的context_edit，并且修改的是suffix之外的entry
 	const hasExternalReplacement = suffix.some(
 		(entry) =>
 			entry.sourceEntry.type === "context_edit" &&
@@ -876,16 +896,21 @@ function findProjectedCutPoint(
 		);
 	if (isRecoveryOmissionSuffix) cutIndex++;
 
+	// 把相邻的空entry一起保留，不停地往前找，如果messages为空的话，一起保留下来。
 	while (cutIndex > startIndex) {
 		const previous = entries[cutIndex - 1];
 		if (previous.sourceEntry.type === "compaction" || previous.messages.length > 0) break;
 		cutIndex--;
 	}
+	// 下面的逻辑在判断是否切在一个turn中间
+	// 先判断这个切点是否是一个turn的开始
 	const startsTurn = isProjectedTurnStart(entries[cutIndex]);
+	// 如果是的话，不用找turn的开始位置了，否则查找turn开始的位置
 	const turnStartIndex = startsTurn ? -1 : findProjectedTurnStartIndex(entries, cutIndex, startIndex);
 	return {
 		firstKeptEntryIndex: cutIndex,
 		turnStartIndex,
+		// 判断是否切在了turn的中间
 		isSplitTurn: !startsTurn && turnStartIndex !== -1,
 	};
 }
@@ -894,7 +919,7 @@ export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
 ): CompactionPreparation | undefined {
-	// 如果发送传入的entries数组里面最后一个entry已经是compaction类型的了，直接返回，不需要再compact了
+	// 如果发现传入的entries数组里面最后一个entry已经是compaction类型的了，直接返回，不需要再compact了
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
 	}
@@ -921,43 +946,68 @@ export function prepareCompaction(
 		boundaryStart = prevCompactionIndex + 1;
 	}
 	const boundaryEnd = projectedEntries.length;
+	// 估计投影上下文的token总量，也就是压缩前的token量
 	const tokensBefore = estimateProjectedContextTokens(projection, pathEntries).tokens;
+	// 找到本次压缩的切点，里面有三个属性：
+	// 一个是切点所在的位置，也就是第一个要保留的entry的下标；
+	// 然后是切点是否在一个turn的中间
+	// 如果是的话，会记录这个turn开始的entry的下标
 	const cutPoint = findProjectedCutPoint(projectedEntries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
 
+	// 根据切点对应的第一个要保留的entry的下标，找到对应的entry
 	const firstKeptEntry = projectedEntries[cutPoint.firstKeptEntryIndex]?.sourceEntry;
+	// 如果没有id，直接返回
 	if (!firstKeptEntry?.id) return undefined;
+	// 找到第一个要保留的entry的id
 	const firstKeptEntryId = firstKeptEntry.id;
+	// 找到切点所在turn的开始的entry的下标
 	const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
-
+	// 截取压缩开始下标到切点所在turn开始的位置的entries数组，转换成要压缩的消息数组
 	const messagesToSummarize = projectedEntries
 		.slice(boundaryStart, historyEnd)
+		// 该方法过滤compaction类型的entry以及system类型的message
 		.flatMap(getMessagesFromProjectedEntryForCompaction);
+	// 如果切点是在turn中间，截取turn开始的位置到切点位置的entry数组，并转换成消息数组
 	const turnPrefixMessages = cutPoint.isSplitTurn
 		? projectedEntries
 				.slice(cutPoint.turnStartIndex, cutPoint.firstKeptEntryIndex)
 				.flatMap(getMessagesFromProjectedEntryForCompaction)
 		: [];
 
+	// 如果两个消息数组数量都为0，返回undefined，不压缩
 	if (messagesToSummarize.length === 0 && turnPrefixMessages.length === 0) return undefined;
 
 	// Extract file operations from edited model-visible messages and the previous compaction.
+	// 从要压缩的消息数组中提取文件操作
 	const fileOps = extractFileOperations(messagesToSummarize, sourceEntries, prevCompactionIndex);
 
 	// Also extract file ops from turn prefix if splitting
+	// 如果切点在turn里面
 	if (cutPoint.isSplitTurn) {
+		// 遍历turn开始的位置到切点的消息里面，解析消息的toolcall提取文件操作信息
 		for (const msg of turnPrefixMessages) {
 			extractFileOpsFromMessage(msg, fileOps);
 		}
 	}
 
+	// 返回压缩准备对象
 	return {
+		// 第一个要保存的entry的id
 		firstKeptEntryId,
+		// 要压缩的消息数组，[boundaryStart, turnStartIndex)
 		messagesToSummarize,
+		// 切点所在turn的第一个entry的下标到 切点的消息数组，[turnStartIndex, firstKeptEntryIndex)
+		// 如果切点不在turn中间，该消息数组为空，上面要压缩的消息数组直接到firstKeptEntryIndex
 		turnPrefixMessages,
+		// 切点是否在turn中间
 		isSplitTurn: cutPoint.isSplitTurn,
+		// 压缩前的token数量
 		tokensBefore,
+		// 上一次压缩的总结内容
 		previousSummary,
+		// 文件操作信息
 		fileOps,
+		// 压缩配置
 		settings,
 	};
 }
@@ -1018,9 +1068,11 @@ export async function compact(
 	let summary: string;
 	let summaryUsage: Usage;
 
+	// 如果切点在turn中间，且切点到turn开始位置存在消息
 	if (isSplitTurn && turnPrefixMessages.length > 0) {
 		let historyText = previousSummary ?? "No prior history.";
 		let historyUsage: Usage | undefined;
+		// 先压缩起点到turn开始位置的消息
 		if (messagesToSummarize.length > 0) {
 			const historyResult = await generateSummaryWithUsage(
 				messagesToSummarize,
@@ -1041,6 +1093,7 @@ export async function compact(
 			historyText = historyResult.text;
 			historyUsage = historyResult.usage;
 		}
+		// 再压缩turn开始位置到切点的消息
 		const turnPrefixResult = await generateTurnPrefixSummary(
 			turnPrefixMessages,
 			model,
@@ -1056,10 +1109,13 @@ export async function compact(
 			sessionId,
 		);
 		// Merge into single summary
+		// 整合两段压缩的内容
 		summary = `${historyText}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult.text}`;
+		// 整合两段压缩的token消耗
 		summaryUsage = historyUsage ? combineUsage(historyUsage, turnPrefixResult.usage) : turnPrefixResult.usage;
 	} else {
 		// Just generate history summary
+		// 如果切点不在turn中间，只压缩一次
 		const result = await generateSummaryWithUsage(
 			messagesToSummarize,
 			model,
@@ -1081,13 +1137,16 @@ export async function compact(
 	}
 
 	// Compute file lists and append to summary
+	// 计算对文件的操作
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+	// 添加到压缩内容末尾
 	summary += formatFileOperations(readFiles, modifiedFiles);
 
 	if (!firstKeptEntryId) {
 		throw new Error("First kept entry has no UUID - session may need migration");
 	}
 
+	// 返回压缩后的内容
 	return {
 		summary,
 		firstKeptEntryId,

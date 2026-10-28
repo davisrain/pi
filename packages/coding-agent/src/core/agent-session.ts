@@ -443,8 +443,11 @@ export class AgentSession {
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 
+	// 这个是在_rebuildSystemPrompt的时候拼出来的
 	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
 	/** Prompt options after before_agent_start mutations for the active run. */
+	// 每次用户发起一次新的run的时候，将_baseSystemPromptOptions交给before_agent_start扩展，扩展或修改之后的内容保存到该属性。
+	// 每次turn之间会用当前的工具集刷新它，run结束的时候清理掉。可以理解为本次run实际在使用的system prompt配置
 	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
 
 	constructor(config: AgentSessionConfig) {
@@ -539,6 +542,7 @@ export class AgentSession {
 		thinkingLevel: ThinkingLevel;
 	}> {
 		// Route a virtual model first: summaries size their input and output from the model they get.
+		// 如果是virtualModel的话，解析virtualModel
 		const { model, thinkingLevel } = isVirtualModel(selectedModel)
 			? await this._modelRuntime.resolveModel(selectedModel, convertToLlm(this.messages), {
 					reason: "direct",
@@ -546,10 +550,13 @@ export class AgentSession {
 					signal,
 				})
 			: { model: selectedModel, thinkingLevel: this.thinkingLevel };
+		// 全局 pi-ai streamSimple 不会自己解析凭证，必须在这里严格拿到；其他 streamFn（CLI 走 modelRuntime）会在 prepareRequest 里再解析，这里尽力而为即可
 		if (this.agent.streamFunction === streamSimple) {
+			// 这里获取必要的model的auth结果
 			return { ...(await this._getRequiredRequestAuth(model, signal)), thinkingLevel };
 		}
 
+		// 这里仅仅是尝试获取auth结果，没获取到旧返回undefined
 		try {
 			const result = await this._modelRuntime.getAuth(model, { signal });
 			if (!result) return { model, thinkingLevel };
@@ -871,27 +878,34 @@ export class AgentSession {
 				: undefined);
 		// 然后通过装饰器模式在原始agent的方法外层添加逻辑，并重新赋值给agent
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
-			// 在下一次请求llm之前尝试压缩上下文，主要是压缩消息列表
+			// 在下一次请求llm之前尝试压缩上下文，主要是压缩消息列表，并且重新做了投影
 			const context = await this._compactBeforeNextAssistantResponse(turn.context);
+			// 调用agent实际自带的prepareNextTurnWithContext方法
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.({ ...turn, context }, signal);
+			// 如果agent自身的方法没有返回，直接使用上一步的进行过压缩判定的context
 			const nextContext = previousSnapshot?.context ?? context;
 			const runOptions = this._runSystemPromptOptions ?? this._baseSystemPromptOptions;
+			// 用当前激活的工具覆盖selectedTools，合并snippets和guidelines
 			const options = normalizeBuildSystemPromptOptions({
 				...runOptions,
 				selectedTools: this.getActiveToolNames(),
 				toolSnippets: { ...this._baseSystemPromptOptions.toolSnippets, ...runOptions.toolSnippets },
 				toolGuidelines: { ...this._baseSystemPromptOptions.toolGuidelines, ...runOptions.toolGuidelines },
 			});
+			// 根据最新的options和最新的messages计算出要更新的SystemMessage
 			const updateMessage = this._preparePromptAndToolLoadout(options, nextContext.messages);
 			// Keep session.systemPrompt and ctx.getSystemPrompt() in step with what the provider sees.
+			// 将更新后的options作为本次run的systemPrompt的options
 			this._runSystemPromptOptions = options;
 
+			// 返回本次turn要更新的内容
 			return {
 				...previousSnapshot,
 				context: {
 					...nextContext,
 					tools: this.agent.state.tools.slice(),
 				},
+				// 将要更新的SystemMessage放入
 				messages: updateMessage
 					? [...(previousSnapshot?.messages ?? []), updateMessage]
 					: previousSnapshot?.messages,
@@ -906,10 +920,13 @@ export class AgentSession {
 	// =========================================================================
 
 	private _refreshFinalizedContext(): void {
+		// 构建投射版本的entries数组
 		const projection = this.sessionManager.buildSessionProjection();
 		for (const entry of projection.entries) {
+			// 构建message到entryId的映射
 			for (const message of entry.messages) this._entryIdsByMessage.set(message, entry.sourceEntry.id);
 		}
+		// 根据agent.state里面的消息数组
 		this.agent.state.messages = projection.messages;
 	}
 
@@ -1510,31 +1527,45 @@ export class AgentSession {
 	 * requests (see {@link _installHiddenDeclarationsProjection}).
 	 */
 	private _applyToolLoadout(toolNames: string[]): AgentTool[] {
+		// 根据toolName去注册的tool里面获取真实的tool对象，且过滤tool的exposure是hidden的元素
 		const tools = [...new Set(toolNames)].flatMap((name) => {
 			const tool = this._toolRegistry.get(name);
 			return tool && this._getToolExposure(name) !== "hidden" ? [tool] : [];
 		});
+
+		// 查看哪些tool里面声明了prepareLoadout这个钩子函数的，收集起来
 		const hooks = tools.flatMap((tool) => {
 			const entry = this._toolDefinitions.get(tool.name);
 			return entry?.definition.prepareLoadout ? [entry] : [];
 		});
 		const hidden = new Set<string>();
 		let declared = tools;
+		// 如果存在钩子函数
 		if (hooks.length > 0) {
+			// 构建loadout对象
 			const loadout: ToolLoadout = {
+				// 声明的暴露出来的工具列表
 				declared: tools,
+				// 获取注册的工具中能调用的工具
 				callable: this._getCallableTools(new Set(tools.map((tool) => tool.name))),
+				// 注册的工具列表
 				registered: [...this._toolRegistry.values()],
+				// 获取工具暴露属性的方法
 				getExposure: (name) => this._getToolExposure(name),
+				// 获取工具命名空间的方法
 				getNamespace: (name) => this._toolDefinitions.get(name)?.definition.namespace,
 			};
 			const descriptions = new Map<string, string>();
+			// 遍历调用钩子函数
 			for (const { definition, sourceInfo } of hooks) {
 				try {
+					// 调用每个hook里面的prepareLoadout方法
 					const changes = definition.prepareLoadout?.(loadout);
+					// 替换某些工具给模型的描述
 					for (const [name, description] of Object.entries(changes?.descriptions ?? {})) {
 						descriptions.set(name, description);
 					}
+					// 工具保持激活，仍然可以调用，但请求里面不发它的声明
 					for (const name of changes?.hiddenDeclarations ?? []) hidden.add(name);
 				} catch (error) {
 					this._extensionRunner.emitError({
@@ -1545,12 +1576,15 @@ export class AgentSession {
 					});
 				}
 			}
+			// 替换工具里面的描述
 			declared = tools.map((tool) => {
 				const description = descriptions.get(tool.name);
 				return description === undefined ? tool : { ...tool, description };
 			});
 		}
+		// 将要隐藏描述的工具名集合保存起来
 		this._hiddenDeclarations = hidden;
+		// 替换agent.state.tools
 		this.agent.state.tools = declared;
 		return declared;
 	}
@@ -1673,11 +1707,18 @@ export class AgentSession {
 		options: NormalizedBuildSystemPromptOptions,
 		messages: AgentMessage[] = this.agent.state.messages,
 	): SystemMessage | undefined {
+		// 应用每个toolDefinition可以携带的prepareLoadout钩子函数，对所有tool的description做修改，并将修改后的tools应用回agent.state.tools。
+		// 这一步会过滤掉那些hidden的tool。将处理过后的tools回写回options，确保options里面的和agent.state.tools里面的内容是对齐的
 		options.selectedTools = this._applyToolLoadout(options.selectedTools).map((tool) => tool.name);
+		// 比较由options构建的sections（当前的）和由SystemMessage数组构建的sections（以前的）的区别，如果存在差别，返回具体的差别sections
 		const sections = diffSystemPromptSections(
+			// 根据传入的消息列表，构建出一个集合了目前所有content sections tools的SystemMessage
+			// 然后获取其中的sections元素
 			getCurrentSystemMessage(messages)?.sections ?? {},
+			// 根据runSystemPromptOptions构建成实际的SystemPromptSections对象，里面包含了systemPrompt的所有信息
 			buildSystemPromptSections(options),
 		);
+		// 如果存在sections的差距，构建一个SystemMessage返回，里面变化的section的内容
 		return sections ? { role: "system", content: "", sections, timestamp: Date.now() } : undefined;
 	}
 
@@ -2650,7 +2691,9 @@ export class AgentSession {
 		reason: "manual" | "threshold" | "overflow",
 	): Promise<CompactionResult> {
 		// Resolve the request only when Pi summarizes itself: routing may call models or fail.
+		// 获取要进行压缩的请求，并且判断权限
 		const request = await this._getSummarizationRequestAuth(model, signal);
+		// 执行真正的压缩逻辑
 		return compact(
 			preparation,
 			request.model,
@@ -3037,9 +3080,9 @@ export class AgentSession {
 
 			// 获取当前会话要发送给llm的entry数组
 			const pathEntries = this.sessionManager.getBranch();
-			// 准备压缩，判断要压缩的entry的切点位置等
+			// 准备压缩，返回切点位置等信息
 			const preparation = prepareCompaction(pathEntries, settings);
-			// 如果返回的undefined，返回false
+			// 如果返回的undefined，返回false，不压缩
 			if (!preparation) {
 				return false;
 			}
@@ -3056,7 +3099,9 @@ export class AgentSession {
 
 			let extensionCompaction: CompactionResult | undefined;
 
+			// 判断extensionRunner里面是否有类型为session_before_compact的handler
 			if (this._extensionRunner.hasHandlers("session_before_compact")) {
+				// 如果存在，发送对应的事件，拿到extension执行的结果
 				const extensionResult = (await this._extensionRunner.emit({
 					type: "session_before_compact",
 					preparation,
@@ -3066,12 +3111,14 @@ export class AgentSession {
 					willRetry,
 					signal: abortController.signal,
 				})) as SessionBeforeCompactResult | undefined;
-
+				
+				// 如果结果返回被取消了，报错
 				if (extensionResult?.cancel) {
 					cancelledByExtension = true;
 					throw new Error("Compaction cancelled");
 				}
-
+				
+				// 如果结果里面存在压缩结果，赋值给extensionCompaction，并且将fromExtension标志设置为true
 				if (extensionResult?.compaction) {
 					extensionCompaction = extensionResult.compaction;
 					fromExtension = true;
@@ -3085,6 +3132,7 @@ export class AgentSession {
 			let usage: Usage | undefined;
 			let details: unknown;
 
+			// 判断如果被extension压缩了，直接取extension压缩的结果即可
 			if (extensionCompaction) {
 				// Extension provided compaction content
 				summary = extensionCompaction.summary;
@@ -3094,6 +3142,7 @@ export class AgentSession {
 				details = extensionCompaction.details;
 			} else {
 				// Shared default summary generator, also used by manual compaction.
+				// 否则使用默认的压缩
 				const compactResult = await this._runDefaultCompaction(
 					preparation,
 					model,
@@ -3109,16 +3158,22 @@ export class AgentSession {
 			}
 			abortController.signal.throwIfAborted();
 
+			// 将压缩信息添加进sessionManager中
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
+			// 然后拿到压缩后的entries数组
 			const newEntries = this.sessionManager.getEntries();
+			// 将更新后的sessionManager里面的entries的投射版本更新进agent的state中
 			this._refreshFinalizedContext();
+			// 预估压缩之后的token数量
 			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
 
 			// Get the saved compaction entry for the extension event
+			// 找到那个已经被保存好的压缩entry
 			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
 				| CompactionEntry
 				| undefined;
 
+			// 向extensionRunner发送 session_compact事件，传递已经保存的压缩entry
 			if (this._extensionRunner && savedCompactionEntry) {
 				await this._extensionRunner.emit({
 					type: "session_compact",
@@ -3129,6 +3184,7 @@ export class AgentSession {
 				});
 			}
 
+			// 收集压缩结果
 			const result: CompactionResult = {
 				summary,
 				firstKeptEntryId,
@@ -3137,12 +3193,16 @@ export class AgentSession {
 				usage,
 				details,
 			};
+			// 给agentSession发送compaction_end事件
 			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 
+			// 如果willRetry是true，返回true，继续loop循环
 			if (willRetry) return true;
 
 			// Auto-compaction can complete while follow-up/steering/custom messages are waiting.
 			// Continue once so queued messages are delivered.
+			// 自动压缩可以在没有队列里面没有消息的时候停止。
+			// 如果一旦队列中有消息，那么需要继续loop逻辑
 			return this.agent.hasQueuedMessages();
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "compaction failed";
@@ -3562,6 +3622,7 @@ export class AgentSession {
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
 
+		// 从resourceLoader里面获取加载到的extensions
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
 			for (const [name, value] of options.flagValues) {

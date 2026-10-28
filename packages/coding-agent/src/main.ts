@@ -131,6 +131,7 @@ function isPlainRuntimeMetadataCommand(parsed: Args): boolean {
 }
 
 async function runAuthCommand(args: string[]): Promise<boolean> {
+	// 如果第一个命令是auth 后面跟help相关的命令，打印auth的help说明即可
 	if (isAuthCommandHelp(args)) {
 		printAuthCommandHelp();
 		return true;
@@ -138,6 +139,7 @@ async function runAuthCommand(args: string[]): Promise<boolean> {
 
 	let command: AuthCommand | undefined;
 	try {
+		// 解析auth命令
 		command = parseAuthCommand(args);
 	} catch (error) {
 		const message = error instanceof AuthCommandError ? error.message : "Failed to parse auth command";
@@ -565,14 +567,19 @@ export interface MainOptions {
 }
 
 export async function main(args: string[], options?: MainOptions) {
+	// 启动耗时统计，后面的time都在打点
 	resetTimings();
+	// 将内置的extensions和传入的extensionFactories整合
 	const extensionFactories = [...builtInExtensions, ...(options?.extensionFactories ?? [])];
+	// 开了--offline或者PI_OFFLINE的时候设置环境变量，关闭版本检查
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
 	if (offlineMode) {
 		process.env.PI_OFFLINE = "1";
 		process.env.PI_SKIP_VERSION_CHECK = "1";
 	}
 
+	// 下面是在检查一次性的子命令，执行完直接退出
+	// auth相关的命令
 	if (await runAuthCommand(args)) {
 		return;
 	}
@@ -588,6 +595,7 @@ export async function main(args: string[], options?: MainOptions) {
 	applyHttpProxySettings(bootstrapSettingsManager.getGlobalSettings().httpProxy);
 	configureHttpDispatcher();
 
+	// 处理install update list等包管理命令
 	if (await handlePackageCommand(args, { extensionFactories })) {
 		const exitCode = process.exitCode ?? 0;
 		if (process.platform === "win32" && exitCode === 0 && args[0] === "update") {
@@ -601,16 +609,19 @@ export async function main(args: string[], options?: MainOptions) {
 		return;
 	}
 
+	// 处理config相关的命令
 	if (await handleConfigCommand(args, { extensionFactories })) {
 		return;
 	}
 
+	// 处理mcp的命令
 	if (args[0] === "mcp") {
 		const { runMcpCommand } = await loadMcpCommand();
 		process.exitCode = await runMcpCommand(args.slice(1), { cwd, agentDir });
 		return;
 	}
 
+	// 解析传入的参数
 	const parsed = parseArgs(args);
 	if (parsed.diagnostics.length > 0) {
 		for (const d of parsed.diagnostics) {
@@ -623,11 +634,13 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("parseArgs");
 
+	// 如果参数中带有--version，打印版本号返回
 	if (parsed.version) {
 		console.log(VERSION);
 		process.exit(0);
 	}
 
+	// 如果参数中带有--export，将会话导出成html返回
 	if (parsed.export) {
 		let result: string;
 		try {
@@ -642,12 +655,15 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(0);
 	}
 
+	// 决定运行的模式，是rpc json print还是interactive
 	let appMode = resolveAppMode(parsed, process.stdin.isTTY, process.stdout.isTTY);
+	// 如果不是交互模式，需要接管stdout
 	const shouldTakeOverStdout = appMode !== "interactive" && !isPlainRuntimeMetadataCommand(parsed);
 	if (shouldTakeOverStdout) {
 		takeOverStdout();
 	}
 
+	// 如果是rpc模式但是传入了文件，报错
 	if (parsed.mode === "rpc" && parsed.fileArgs.length > 0) {
 		console.error(chalk.red("Error: @file arguments are not supported in RPC mode"));
 		process.exit(1);
@@ -657,9 +673,11 @@ export async function main(args: string[], options?: MainOptions) {
 	validateSessionIdFlags(parsed);
 
 	// Run migrations (pass cwd for project-local migrations)
+	// 迁移旧版本的配置和认证数据
 	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(cwd);
 	time("runMigrations");
 
+	// 创建配置管理器
 	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
 	const startupSettingsDiagnostics = collectSettingsDiagnostics(startupSettingsManager);
 
@@ -708,12 +726,15 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("createSessionManager");
 
+	// 创建项目信任的存储对象
 	const trustStore = new ProjectTrustStore(agentDir);
+	// 获取工作目录
 	const sessionCwd = sessionManager.getCwd();
 	const autoTrustOnReloadCwd =
 		parsed.projectTrustOverride === undefined && !hasTrustRequiringProjectResources(sessionCwd)
 			? sessionCwd
 			: undefined;
+	// 获取信任的prompt模式
 	const trustPromptMode: AppMode = parsed.help || parsed.listModels !== undefined ? "print" : appMode;
 	const projectTrustByCwd = new Map<string, boolean>();
 
@@ -721,6 +742,7 @@ export async function main(args: string[], options?: MainOptions) {
 	const resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
 	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
+	// 创建Runtime
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
 		cwd,
 		agentDir,
@@ -853,6 +875,7 @@ export async function main(args: string[], options?: MainOptions) {
 		};
 	};
 	time("createRuntime");
+	// 创建agentSessionRuntime
 	const runtime = await createAgentSessionRuntime(createRuntime, {
 		cwd: sessionManager.getCwd(),
 		agentDir,

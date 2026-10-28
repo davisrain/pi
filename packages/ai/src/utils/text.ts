@@ -29,6 +29,7 @@ export function renderSystemMessageUpdate(message: SystemMessage): string {
 	const parts: string[] = [];
 	const text = contentText(message.content);
 	if (text.length > 0) parts.push(text);
+	// 遍历SystemMessage里面的sections，将每个section的内容拼接出来
 	for (const [name, value] of Object.entries(message.sections ?? {})) {
 		parts.push(
 			value === null

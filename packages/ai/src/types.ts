@@ -438,6 +438,7 @@ export interface Usage {
 	 */
 	reasoning?: number;
 	totalTokens: number;
+	// 这个里面是token消耗量对应的美元
 	cost: {
 		input: number;
 		output: number;
