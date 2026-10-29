@@ -1031,7 +1031,7 @@ export class ModelRuntime implements Models {
 		if (!target) throw new Error(`${routed}, which is not a physical model.`);
 		// 如果没有权限了，报错
 		if (!this.hasConfiguredAuth(target.provider)) throw new Error(`${routed}, which has no credentials.`);
-		// 返回最终路由到的模型
+		// 返回最终路由到的模型，并且收紧thinkingLevel
 		return { model: target, thinkingLevel: clampThinkingLevel(target, route.thinkingLevel), state: route.state };
 	}
 

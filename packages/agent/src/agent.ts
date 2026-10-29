@@ -374,7 +374,7 @@ export class Agent {
 	async prompt(input: string, images?: ImageContent[]): Promise<void>;
 	// 触发一次agent loop的入口方法
 	async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageContent[]): Promise<void> {
-		// 如果当前agent已经在跑了，报错，只能使用steer或者fllowup来添加消息到队列中
+		// 如果当前agent已经在跑了，报错，只能使用steer或者followup来添加消息到队列中
 		if (this.activeRun) {
 			throw new Error(
 				"Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",

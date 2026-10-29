@@ -195,11 +195,15 @@ async function runLoop(
 			let preparedMessages: AgentMessage[] = [];
 			// 如果lastCompletedTurn存在，说明之前已经执行过一次turn了
 			if (lastCompletedTurn) {
-				// 根据最后一次完成的turn准备下一次turn的snapshot，这里可以做很多事情，比如compact
+				// 根据最后一次完成的turn准备下一次turn的snapshot，这个方法里面做了很多事情：
+				// compact、更改tools的description、更改systemPrompt的sections
+				// 返回的snapshot中的messages就是包含systemPromptSections改动的SystemMessage
 				const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
-				// 将上下文和配置更新为nextTurnSnapshot里面带有的
+				// 如果存在nextTurnSnapshot，也就是prepareNextTurn存在返回
 				if (nextTurnSnapshot) {
+					// 获取nextTurnSnapshot里面的context
 					currentContext = nextTurnSnapshot.context ?? currentContext;
+					// 获取snapshot里面的messages，是根据最新的SystemPromptOptions计算出来的sections变动的SystemMessage
 					preparedMessages = nextTurnSnapshot.messages ?? [];
 					config = {
 						...config,
@@ -226,6 +230,7 @@ async function runLoop(
 
 			// Process prepared and queued messages before the next assistant response.
 			// 在下一次请求llm之前先处理pending messages和prepared messages
+			// 计算出tools的变化并且添加到preparedMessages中的SystemMessage的toolsAdded属性上
 			for (const message of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {
 				await emit({ type: "message_start", message });
 				await emit({ type: "message_end", message });

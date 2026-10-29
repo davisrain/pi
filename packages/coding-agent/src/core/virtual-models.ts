@@ -146,12 +146,17 @@ export function getBranchSelection(
 
 /** Latest router state a session branch stores for a virtual model. */
 export function getVirtualModelState(branch: readonly SessionEntry[], provider: string, modelId: string): unknown {
+	// 倒序遍历
 	for (let i = branch.length - 1; i >= 0; i--) {
 		const entry = branch[i];
+		// 如果类型不是custom 或者 customType不是pi.virtual-model-state，直接跳过
 		if (entry.type !== "custom" || entry.customType !== VIRTUAL_MODEL_STATE_ENTRY) continue;
+		// 找到虚拟模型的状态
 		const data = entry.data as VirtualModelStateData | undefined;
+		// 判断provider和modelId是否相等，相等就返回state属性
 		if (data?.provider === provider && data.modelId === modelId) return data.state;
 	}
+	// 没找到返回undefined
 	return undefined;
 }
 

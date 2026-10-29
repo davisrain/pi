@@ -472,9 +472,12 @@ export class AgentSession {
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
+		// 给agent注册listener，用于监听消息事件，然后更新entries中的消息
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
+		// 装饰agent的prepareNextTurn方法
 		this._installAgentNextTurnRefresh();
+		// 装饰agent的prepareRequest方法
 		this._installAgentRequestProjection();
 		this._installAgentBoundaryHooks();
 		this._installHiddenDeclarationsProjection();
@@ -760,21 +763,31 @@ export class AgentSession {
 
 	private _installAgentRequestProjection(): void {
 		const previousPrepareRequest = this.agent.prepareRequest;
+		// 使用装饰器模式来添加额外的逻辑
 		this.agent.prepareRequest = async (request, signal) => {
+			// 将失败过的AIMessage赋值给failed，然后将原本的引用设置为undefined
+			// 自动重试 或者 溢出后压缩并重试时设置，虚拟模型路由的时候作为failed传给router
 			const failed = this._failedResponse;
 			this._failedResponse = undefined;
+			// 这里封装成方法是因为下面可能还会再次调用
 			const prepare = async () => {
+				// 构建消息投影
 				const projection = this.sessionManager.buildSessionProjection();
 				const canonicalContext = {
 					...request.context,
+					// 使用投影的消息列表覆盖context中的消息列表，不用loop自己积累的消息列表 todo 但投影中的消息列表是最新的吗
 					messages: projection.messages,
 					// Messages declare the provider-visible loadout; context.tools keeps executable implementations.
+					// System消息里面声明的决定模型能看到哪些工具，context.tools里面放的是带execute的可执行实现。
+					// 使用agent state中的tools替换context中的工具
 					tools: this.agent.state.tools.slice(),
 				};
+				// 调用agent原本的prepareRequest方法，拿到AgentRequestUpdate返回
 				const previous = await previousPrepareRequest?.(
 					{
 						...request,
 						context: canonicalContext,
+						// 模型和thinkingLevel使用agent里面state的实现，而不是loop里面的状态，run中途切模型时，下一次请求就会生效
 						model: this.agent.state.model,
 						thinkingLevel: this.agent.state.thinkingLevel,
 					},
@@ -782,17 +795,24 @@ export class AgentSession {
 				);
 				return { previous, context: previous?.context ?? canonicalContext, projection };
 			};
+			// 调用prepare拿到previous的RequestUpdate、context和projection
 			let { previous, context, projection } = await prepare();
+			// 尝试获取原始的prepareRequest方法执行之后的model和thinkingLevel，如果不存在，还是拿agent的state的来兜底
 			const model = previous?.model ?? this.agent.state.model;
 			const thinkingLevel = previous?.thinkingLevel ?? this.agent.state.thinkingLevel;
+			// 如果model不是虚拟模型，直接返回
 			if (!isVirtualModel(model)) return { ...previous, context, model, thinkingLevel };
 
 			// The selection stays in agent state; only this request uses the routed model. A routing
 			// failure rejects, which ends the run with an error response. Only messages the user wrote
 			// start a turn; extension messages can follow them, e.g. from before_agent_start.
+			// 找到最后一个ai返回的消息
 			const lastResponse = context.messages.findLastIndex((message) => message.role === "assistant");
+			// 查找最后一个ai消息后面是否还有用户输入的消息
 			const userTurn = context.messages.slice(lastResponse + 1).some((message) => message.role === "user");
+			// 获取branch数组，根据model的provider和id查找虚拟模型的状态
 			const state = getVirtualModelState(this.sessionManager.getBranch(), model.provider, model.id);
+			// 解析虚拟模型
 			const route = await this._modelRuntime.resolveModel(model, convertToLlm(context.messages), {
 				reason: failed ? "retry" : userTurn ? "user" : "continuation",
 				thinkingLevel,
@@ -800,17 +820,22 @@ export class AgentSession {
 				failed,
 				state,
 			});
+			// 如果路由出的模型的状态变化了
 			if (route.state !== undefined && route.state !== state) {
+				// 记录状态的变化到entries中
 				const data: VirtualModelStateData = { provider: model.provider, modelId: model.id, state: route.state };
 				const entry = this.sessionManager.getEntry(
 					this.sessionManager.appendCustomEntry(VIRTUAL_MODEL_STATE_ENTRY, data),
 				);
+				// 发送entry_appended事件
 				if (entry) this._emit({ type: "entry_appended", entry });
 			}
 			// The route stands: the router already decided this request. The state entry does not change
 			// the projection.
+			// 因为已经路由到真实的模型了，能够拿到上下文窗口，如果此时发现上下文超出了阈值，进行压缩
 			if (this._exceedsCompactionThreshold(route.model, projection)) {
 				await this._runAutoCompaction("threshold", false);
+				// 压缩完成后重新调用prepare方法
 				({ previous, context } = await prepare());
 			}
 			return { ...previous, context, model: route.model, thinkingLevel: route.thinkingLevel };
