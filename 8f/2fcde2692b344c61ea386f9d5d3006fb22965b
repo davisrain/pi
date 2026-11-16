@@ -1,0 +1,26 @@
+packages/ai/src/utils/transcript.ts
+  h_ae210496e23b9f 14,18,33,35
+packages/coding-agent/src/core/agent-session.ts
+  h_ae210496e23b9f 483,780-781,812,1770,1773,1775,1780,1782,1797,1801-1802,1804,1811
+packages/ai/src/compat.ts
+  h_ae210496e23b9f 135,202,204,206,209,222,245-246,248-249,251,294,296,299,301,304,307-310,312
+packages/ai/src/models.ts
+  h_ae210496e23b9f 1218,1221,1223,1225,1227,1229,1238,1240,1243,1245,1248,1253,1258
+packages/agent/src/agent-loop.ts
+  h_ae210496e23b9f 246,470-473,479,482,486,488,491,498,504,506,508,510,512,515,528,530,533,541,544,546,552,562
+packages/ai/src/types.ts
+  h_ae210496e23b9f 1101,1103-1104
+packages/ai/src/providers/all.ts
+  h_ae210496e23b9f 185,187
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.52-trip",
+  "base_commit_sha": "8f2fcde2692b344c61ea386f9d5d3006fb22965b",
+  "prompts": {},
+  "humans": {
+    "h_ae210496e23b9f": {
+      "author": "Zhengyu Dai 代征宇 <zhengyudai@trip.com>"
+    }
+  }
+}
