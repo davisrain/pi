@@ -243,6 +243,7 @@ async function runLoop(
 			pendingMessages = [];
 
 			// 调用config的prepareRequest这个钩子函数来对要调用llm的request做处理
+			// agent-session.ts装饰后的方法逻辑里面 添加了对virtualmodel的路由，以及路由之后可能对上下文压缩进行压缩
 			const requestUpdate = await config.prepareRequest?.(
 				{
 					context: currentContext,
@@ -466,36 +467,52 @@ async function streamAssistantResponse(
 ): Promise<AssistantMessage> {
 	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
 	let messages = context.messages;
+	// 使用config里面的transformContext方法对AgentMessage数组做处理，如果配置了的情况
+	// 现有的agent-session里面对transformContext的装饰主要有两个作用：
+	// 1.在SystemMessage中过滤掉被hiddenDeclaration的tools
+	// 2.如果存在forcedSystemPrompt，使用它替换掉整个SystemMessage的content
 	if (config.transformContext) {
 		messages = await config.transformContext(messages, signal);
 	}
 
 	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
+	// 使用config的convertToLlm方法将AgentMessage转换成llm认识message
 	const llmMessages = await config.convertToLlm(messages);
 
+	// 规范化调用llm的上下文：主要作用是尝试用传入的systemPrompt和tools构建出一个SystemMessage放入到消息数组的头部，然后将整个数组包装成TranscriptContext对象返回
 	const llmContext = normalizeContext({ messages: llmMessages });
 
 	// Resolve API key (important for expiring tokens)
+	// 解析要调用的模型的apiKey
 	const resolvedApiKey =
+		// 如果config里面存在getApiKey这个函数，就调用它，否则直接拿config里面的apiKey属性
 		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
 
+	// 尝试调用streamFunction函数请求带着消息数组请求llm
 	const response = await streamFunction(config.model, llmContext, {
 		...config,
 		apiKey: resolvedApiKey,
 		signal,
 	});
 	// Record the requested level, whichever stream function answered.
+	// 声明一个result函数供下面调用
 	const result = async () => Object.assign(await response.result(), { thinkingLevel: config.reasoning ?? "off" });
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
 
+	// 遍历response返回的event
 	for await (const event of response) {
+		// 针对不同的事件类型，做不同的逻辑
 		switch (event.type) {
+			// 如果是start类型的event
 			case "start":
+				// 获取部分消息
 				partialMessage = event.partial;
+				// 放入到AgentContext上下文的消息数组中
 				context.messages.push(partialMessage);
 				addedPartial = true;
+				// 发送message_start事件
 				await emit({ type: "message_start", message: { ...partialMessage } });
 				break;
 
@@ -508,9 +525,12 @@ async function streamAssistantResponse(
 			case "toolcall_start":
 			case "toolcall_delta":
 			case "toolcall_end":
+				// 如果partialMessage存在
 				if (partialMessage) {
+					// 获取事件里面的partial，放入到上下文消息数组的最后一个元素当中去，覆盖原本的PartialMessage
 					partialMessage = event.partial;
 					context.messages[context.messages.length - 1] = partialMessage;
+					// 发送message_update事件
 					await emit({
 						type: "message_update",
 						assistantMessageEvent: event,
@@ -518,15 +538,18 @@ async function streamAssistantResponse(
 					});
 				}
 				break;
-
+			// 当事件类型是done或者error的情况
 			case "done":
 			case "error": {
+				// 调用result函数拿到最终的消息
 				const finalMessage = await result();
+				// 如果已经将partial消息添加到消息数组了，使用finalMessage替换它，否则将finalMessage添加到数组末尾
 				if (addedPartial) {
 					context.messages[context.messages.length - 1] = finalMessage;
 				} else {
 					context.messages.push(finalMessage);
 				}
+				// 根据情况发送message_start和message_end事件
 				if (!addedPartial) {
 					await emit({ type: "message_start", message: { ...finalMessage } });
 				}
@@ -536,6 +559,7 @@ async function streamAssistantResponse(
 		}
 	}
 
+	// 如果遍历结束都没有出现done或者error事件，手动调用一次result，处理finalMessage
 	const finalMessage = await result();
 	if (addedPartial) {
 		context.messages[context.messages.length - 1] = finalMessage;

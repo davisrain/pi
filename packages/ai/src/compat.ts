@@ -132,6 +132,7 @@ export function registerApiProvider<TApi extends Api, TOptions extends StreamOpt
 	apiProviderRegistry.set(provider.api, {
 		provider: {
 			api: provider.api,
+			// 包装api和stream一起作为ApiStreamFunction，里面添加了调用时对api的校验
 			stream: wrapStream(provider.api, provider.stream),
 			streamSimple: wrapStreamSimple(provider.api, provider.streamSimple),
 		},
@@ -198,10 +199,14 @@ const builtinApiProviderInstances = new Map<Api, ReturnType<typeof getApiProvide
  * already registered an override for a builtin api id.
  */
 export function registerBuiltInApiProviders(): void {
+	// 遍历内置的api集合
 	for (const [api, streams] of BUILTIN_APIS) {
+		// 如果该api还没有注册过
 		if (!getApiProvider(api)) {
+			// 调用register方法进行注册，并且将streams的stream和streamSimple方法都构建成ApiProvider对象传入
 			registerApiProvider({ api, stream: streams.stream, streamSimple: streams.streamSimple });
 		}
+		// 并且将注册好的apiProvider放入到builtinApiProviderInstances这个map中
 		builtinApiProviderInstances.set(api, getApiProvider(api));
 	}
 }
@@ -214,6 +219,7 @@ export function resetApiProviders(): void {
 
 registerBuiltInApiProviders();
 
+// 调用builtinModels创建内置的模型对象
 const compatModels = builtinModels();
 const AMBIENT_AUTH_MARKER = "<authenticated>";
 
@@ -236,8 +242,13 @@ function hasResolvedCloudflareAuth(options: StreamOptions | undefined): boolean 
 }
 
 function getBuiltinProviderForModel(model: Model<Api>) {
+	// 尝试根据model的api获取对应的内置的provider，如果不是，返回undefined
+	// 这一步是为了让被覆盖过的api起作用（也就是自定义的调用模型的方法），不使用内置的api
 	if (getApiProvider(model.api) !== builtinApiProviderInstances.get(model.api)) return undefined;
+	// 如果api没有自定义过，那么就尝试根据provider找到对应的模型提供商的Provider对象
+	// 根据模型的provider名称，拿到对应的Provider对象
 	const provider = compatModels.getProvider(model.provider);
+	// 尝试在模型提供商提供的模型中找到对应的api，如果找不到的话，比如使用的是anthropic这个提供商，但是api使用的是openai-responses这个协议，那肯定是找不到的，返回undefined
 	return provider?.getModels().some((candidate) => candidate.api === model.api) ? provider : undefined;
 }
 
@@ -280,15 +291,25 @@ export function streamSimple<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
+	// 规范化TranscriptContext
 	const transcript = normalizeContext(context);
+	// 根据提供的model尝试找到内置的模型提供商，并且api满足提供商所支持的模型的api
 	const builtinProvider = getBuiltinProviderForModel(model);
 	if (builtinProvider) {
+		// 如果提供商是以cloudflare开头的，并且有解析过的api-key,
 		if (model.provider.startsWith("cloudflare-") && !hasResolvedCloudflareAuth(options)) {
+			// 直接从模型列表中调用streamSimple
 			return compatModels.streamSimple(model, transcript, options);
 		}
+		// 其余情况先从环境变量中解析apiKey，然后调用模型提供商根据model提供的streamSimple
 		return builtinProvider.streamSimple(model, transcript, withEnvApiKey(model, options));
 	}
+	// 如果没有找到内置的provider，那么就需要自行根据api来解析了。
+	// 前面也说过了，两种情况会走到这里：
+	// 1.自定义了api
+	// 2.使用了model里面指定的模型提供商不支持的api，比如providerId是anthropic，但使用了openai的api协议
 	const provider = resolveApiProvider(model.api);
+	// 调用自定义的ApiProvider的streamSimple方法
 	return provider.streamSimple(model, transcript, withEnvApiKey(model, options));
 }
 

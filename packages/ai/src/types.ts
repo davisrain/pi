@@ -1098,7 +1098,10 @@ export interface ModelInputLimits {
 export interface BaseModel<TApi extends string> {
 	id: string;
 	name: string;
+	// api可以理解为请求的协议，即入参返回tool_call怎么解析之类的，会对应到streamFunction
 	api: TApi;
+	// provider就是模型提供商，比如anthropic，提供一堆claude模型。
+	// 然后会根据providerId拿到对应的Provider对象，Provider有getModels方法，能够拿到这个模型提供商提供的所有模型对象
 	provider: ProviderId;
 	baseUrl: string;
 	input: ("text" | "image")[];

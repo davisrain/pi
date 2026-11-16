@@ -480,6 +480,7 @@ export class AgentSession {
 		// 装饰agent的prepareRequest方法
 		this._installAgentRequestProjection();
 		this._installAgentBoundaryHooks();
+		// 用于装饰agent的transformContext方法
 		this._installHiddenDeclarationsProjection();
 		this._installAgentForcedPromptProjection();
 
@@ -775,7 +776,9 @@ export class AgentSession {
 				const projection = this.sessionManager.buildSessionProjection();
 				const canonicalContext = {
 					...request.context,
-					// 使用投影的消息列表覆盖context中的消息列表，不用loop自己积累的消息列表 todo 但投影中的消息列表是最新的吗
+					// 使用投影的消息列表覆盖context中的消息列表，不用loop自己积累的消息列表
+					// 但投影中的消息列表是最新的吗？是最新的，因为每次新增消息都会通过emit发送message_end事件，
+					// 该事件会将消息添加到agent的state中，然后通过listener将消息添加到messageEntries中
 					messages: projection.messages,
 					// Messages declare the provider-visible loadout; context.tools keeps executable implementations.
 					// System消息里面声明的决定模型能看到哪些工具，context.tools里面放的是带execute的可执行实现。
@@ -806,6 +809,7 @@ export class AgentSession {
 			// The selection stays in agent state; only this request uses the routed model. A routing
 			// failure rejects, which ends the run with an error response. Only messages the user wrote
 			// start a turn; extension messages can follow them, e.g. from before_agent_start.
+			// 下面的逻辑都是在路由虚拟模型。
 			// 找到最后一个ai返回的消息
 			const lastResponse = context.messages.findLastIndex((message) => message.role === "assistant");
 			// 查找最后一个ai消息后面是否还有用户输入的消息
@@ -1763,14 +1767,19 @@ export class AgentSession {
 	 * across requests and only change when the loadout does.
 	 */
 	private _installHiddenDeclarationsProjection(): void {
+		// 先持有被装饰的transformContext方法
 		const previousTransformContext = this.agent.transformContext;
 		this.agent.transformContext = async (messages, signal) => {
+			// 先调用被装饰的方法，拿到transformed的结果
 			const transformed = previousTransformContext ? await previousTransformContext(messages, signal) : messages;
+			// 获取需要hidden描述的工具的名称集合
 			const hidden = this._hiddenDeclarations;
 			if (hidden.size === 0) return transformed;
 			return transformed.map((message) => {
 				if (message.role !== "system" || (!message.toolsAdded && !message.toolsRemoved)) return message;
+				// 找到声明了toolsAdded或者toolsRemoved的SystemMessage
 				const { toolsAdded, toolsRemoved, ...rest } = message;
+				// 将数组中存在于hidden中的工具都过滤了
 				const added = toolsAdded?.filter((tool) => !hidden.has(tool.name)) ?? [];
 				const removed = toolsRemoved?.filter((tool) => !hidden.has(tool.name)) ?? [];
 				return {
@@ -1785,16 +1794,21 @@ export class AgentSession {
 	private _installAgentForcedPromptProjection(): void {
 		const previousTransformContext = this.agent.transformContext;
 		this.agent.transformContext = async (messages, signal) => {
+			// 同样，先调用被装饰的transformContext方法
 			const transformed = previousTransformContext ? await previousTransformContext(messages, signal) : messages;
 			const forced = this._runSystemPromptOptions?.forceSystemPrompt;
 			if (forced === undefined) return transformed;
+			// 如果存在forceSystemPrompt
+			// 根据AgentMessage数组整合出当前的SystemMessage
 			const current = getCurrentSystemMessage(transformed);
+			// 使用forced替换当前的SystemMessage中的content，并且将sections都抛弃掉
 			const head: SystemMessage = {
 				role: "system",
 				content: forced,
 				...(current?.toolsAdded ? { toolsAdded: current.toolsAdded } : {}),
 				timestamp: current?.timestamp ?? Date.now(),
 			};
+			// 将消息添加到数组头，然后将后续的systemMessage都过滤掉
 			return [head, ...transformed.filter((message) => message.role !== "system")];
 		};
 	}

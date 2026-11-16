@@ -11,9 +11,11 @@ export function createInitialSystemMessage(
 	systemPrompt: string | undefined,
 	tools: Tool[] | undefined,
 ): SystemMessage | undefined {
+	// 判断是否存在systemPrompt和tools
 	const hasSystemPrompt = systemPrompt !== undefined && systemPrompt.length > 0;
 	const hasTools = tools !== undefined && tools.length > 0;
 	if (!hasSystemPrompt && !hasTools) return undefined;
+	// 如果存在的话，构建一个SystemMessage返回
 	return {
 		role: "system",
 		content: systemPrompt ?? "",
@@ -28,7 +30,9 @@ export function createInitialSystemMessage(
  * provider-facing function expects the result.
  */
 export function normalizeContext(context: Context): TranscriptContext {
+	// 尝试根据systemPrompt和tools构建一个初始的SystemMessage
 	const initialMessage = createInitialSystemMessage(context.systemPrompt, context.tools);
+	// 如果存在的话，添加到消息数组的头部然后构建成TranscriptContext对象返回
 	const messages = initialMessage ? [initialMessage, ...context.messages] : context.messages;
 	return { messages } as TranscriptContext;
 }

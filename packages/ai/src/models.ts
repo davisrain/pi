@@ -1215,12 +1215,18 @@ export function calculateCost(model: AnyModel, usage: Usage): Usage["cost"] {
 const EXTENDED_THINKING_LEVELS: ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 export function getSupportedThinkingLevels<TApi extends Api>(model: Model<TApi>): ModelThinkingLevel[] {
+	// 如果模型不支持思考模式，直接返回off
 	if (!model.reasoning) return ["off"];
 
+	// 否则遍历所有的思考级别
 	return EXTENDED_THINKING_LEVELS.filter((level) => {
+		// 查看每个级别模型是否支持
 		const mapped = model.thinkingLevelMap?.[level];
+		// 如果map里面标记为null，是明确不支持的，过滤
 		if (mapped === null) return false;
+		// xhigh和max不是标准档位，需要明确支持，才不会被过滤，因为不是所有模型都支持这两个档位的
 		if (level === "xhigh" || level === "max") return mapped !== undefined;
+		// 其余情况，就算是undefined，也是默认支持的，使用provider的默认行为
 		return true;
 	});
 }
@@ -1229,20 +1235,27 @@ export function clampThinkingLevel<TApi extends Api>(
 	model: Model<TApi>,
 	level: ModelThinkingLevel,
 ): ModelThinkingLevel {
+	// 寻找模型里面支持的思考档位
 	const availableLevels = getSupportedThinkingLevels(model);
+	// 如果请求的级别在支持的档位里面，直接返回
 	if (availableLevels.includes(level)) return level;
 
+	// 判断请求的level在EXTENDED_THINKING_LEVELS的下标位置
 	const requestedIndex = EXTENDED_THINKING_LEVELS.indexOf(level);
+	// 如果请求的level都不在EXTENDED_THINKING_LEVELS中的话，直接返回模型支持的级别的第一个；可支持的档位集合为空的话，直接返回off
 	if (requestedIndex === -1) return availableLevels[0] ?? "off";
 
+	// 如果请求的档位在EXTENDED_THINKING_LEVELS中，那么尝试去往后遍历，找到一个模型支持的档位
 	for (let i = requestedIndex; i < EXTENDED_THINKING_LEVELS.length; i++) {
 		const candidate = EXTENDED_THINKING_LEVELS[i];
 		if (availableLevels.includes(candidate)) return candidate;
 	}
+	// 如果往后遍历没找到的话，尝试往前遍历
 	for (let i = requestedIndex - 1; i >= 0; i--) {
 		const candidate = EXTENDED_THINKING_LEVELS[i];
 		if (availableLevels.includes(candidate)) return candidate;
 	}
+	// 如果仍然没找到，返回第一个，不存在返回off
 	return availableLevels[0] ?? "off";
 }
 

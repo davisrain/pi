@@ -182,7 +182,9 @@ export function builtinProviders(): Provider[] {
 
 /** A `Models` collection with every built-in provider registered. */
 export function builtinModels(options?: CreateModelsOptions): MutableModels {
+	// 创建MutableModels对象
 	const models = createModels(options);
+	// 遍历内置的providers，将provider添加进models对象中
 	for (const provider of builtinProviders()) {
 		models.setProvider(provider);
 	}
