@@ -47,11 +47,15 @@ export function lazyStream(
 	model: Model<Api>,
 	setup: () => Promise<AsyncIterable<AssistantMessageEvent>>,
 ): AssistantMessageEventStream {
+	// 创建一个外层的eventStream
 	const outer = new AssistantMessageEventStream();
 
+	// 调用初始化方法，加载对应内容
 	setup()
+		// 然后将inner的事件转发到outer里面
 		.then((inner) => forwardStream(outer, inner))
 		.catch((error) => {
+			// 如果出现异常，向outer里面推送错误事件
 			const message = createSetupErrorMessage(model, error);
 			outer.push({ type: "error", reason: "error", error: message });
 			outer.end(message);
@@ -71,6 +75,7 @@ export interface LazyApiCapabilities {
 }
 
 export function lazyApi(load: () => Promise<ProviderStreams>, capabilities?: LazyApiCapabilities): ProviderStreams {
+	// 创建一个lazyApi返回，等实际调用到api的stream或者streamSimple方法的时候，才会调用lazyStream方法，从而调用真正的load函数导入对应厂商的ts文件，再调用对应ts文件中的stream方法
 	const api: ProviderStreams = {
 		stream: (model, context, options) =>
 			lazyStream(model, async () => (await load()).stream(model, context, options)),

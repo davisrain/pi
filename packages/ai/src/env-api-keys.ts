@@ -131,10 +131,13 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
 export function findEnvKeys(provider: KnownProvider, env?: ProviderEnv): string[] | undefined;
 export function findEnvKeys(provider: string, env?: ProviderEnv): string[] | undefined;
 export function findEnvKeys(provider: string, env?: ProviderEnv): string[] | undefined {
+	// 根据provider获取对应的环境变量的变量名集合
 	const envVars = getApiKeyEnvVars(provider);
 	if (!envVars) return undefined;
 
+	// 遍历变量名剔除掉找不到环境变量值的 变量名
 	const found = envVars.filter((envVar) => !!getProviderEnvValue(envVar, env));
+	// 找到了就返回，否则返回undefined
 	return found.length > 0 ? found : undefined;
 }
 
@@ -146,9 +149,12 @@ export function findEnvKeys(provider: string, env?: ProviderEnv): string[] | und
 export function getEnvApiKey(provider: KnownProvider, env?: ProviderEnv): string | undefined;
 export function getEnvApiKey(provider: string, env?: ProviderEnv): string | undefined;
 export function getEnvApiKey(provider: string, env?: ProviderEnv): string | undefined {
+	// 根据provider获取对应的apiKey在环境变量中的值
 	const envKeys = findEnvKeys(provider, env);
 	if (envKeys?.[0]) {
+		// 如果是anthropic，找到不为ANTHROPIC_AUTH_TOKEN的那个key，其他情况都取第一个key
 		const apiKeyEnv = provider === "anthropic" ? envKeys.find((key) => key !== ANTHROPIC_AUTH_TOKEN_ENV) : envKeys[0];
+		// 然后尝试从环境变量中获取 key对应的value
 		if (apiKeyEnv) return getProviderEnvValue(apiKeyEnv, env);
 	}
 

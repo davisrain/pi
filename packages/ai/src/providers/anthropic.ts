@@ -41,6 +41,7 @@ function anthropicApiKeyAuth(): ApiKeyAuth {
 }
 
 export function anthropicProvider(): Provider<"anthropic-messages"> {
+	// 创建anthropic的provider
 	return createProvider({
 		id: "anthropic",
 		name: "Anthropic",
@@ -53,6 +54,7 @@ export function anthropicProvider(): Provider<"anthropic-messages"> {
 				load: loadAnthropicOAuth,
 			}),
 		},
+		// 将id:model结构的对象转换成models的数组
 		models: Object.values(ANTHROPIC_MODELS),
 		api: anthropicMessagesApi(),
 	});

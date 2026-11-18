@@ -217,6 +217,7 @@ export function resetApiProviders(): void {
 	registerBuiltInApiProviders();
 }
 
+// 注册内置的apiProviders
 registerBuiltInApiProviders();
 
 // 调用builtinModels创建内置的模型对象
@@ -231,9 +232,13 @@ function withEnvApiKey<TOptions extends StreamOptions>(
 	model: Model<Api>,
 	options: TOptions | undefined,
 ): TOptions | undefined {
+	// 如果存在明显的apiKey，直接返回options
 	if (hasExplicitApiKey(options?.apiKey)) return options;
+	// 否则根据provider从环境变量里面获取对应的apiKey
 	const apiKey = getEnvApiKey(model.provider, options?.env);
+	// 如果apiKey不存在或者等于<authenticated>，返回options
 	if (!apiKey || apiKey === AMBIENT_AUTH_MARKER) return options;
+	// 否则将解析后的apiKey放入到options中返回
 	return { ...options, apiKey } as TOptions;
 }
 

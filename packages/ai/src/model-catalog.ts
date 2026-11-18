@@ -52,9 +52,13 @@ export type ClassifierModelCatalog<TGroups extends ModelGroups, TProvider extend
 
 function flattenModelCatalog(groups: ModelGroups, type: ModelType): Record<string, object> {
 	return Object.fromEntries(
+		// 这一步是按照api进行分组
 		Object.values(groups)
+			// 将每个api下的各种模型平铺成一个模型数组
 			.flatMap((models) => Object.values(models))
+			// 只筛选出对应类型的模型，比如chat类型的
 			.filter((model) => (model as { type?: unknown }).type === type)
+			// 将模型数组转换成 [id, model]格式的元组数组。最终通过Object.fromEntries组合成属性为各个id:model的对象
 			.map((model) => [(model as { id: string }).id, model]),
 	);
 }

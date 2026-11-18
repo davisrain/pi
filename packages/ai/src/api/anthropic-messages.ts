@@ -508,6 +508,7 @@ async function* iterateAnthropicEvents(
 	}
 }
 
+// anthropic厂商的anthropic-messages协议这个api对应的stream方法
 export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 	model: Model<"anthropic-messages">,
 	context: TranscriptContext,
@@ -863,6 +864,7 @@ function mapThinkingLevelToEffort(
 	}
 }
 
+// anthropic厂商的anthropic-messages协议这个api对应的streamSimple方法
 export const streamSimple: StreamFunction<"anthropic-messages", SimpleStreamOptions> = (
 	model: Model<"anthropic-messages">,
 	context: TranscriptContext,
