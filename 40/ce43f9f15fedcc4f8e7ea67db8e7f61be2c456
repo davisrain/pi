@@ -1,0 +1,28 @@
+packages/ai/src/compat.ts
+  h_ae210496e23b9f 220,235,237,239,241
+packages/ai/src/providers/anthropic.ts
+  h_ae210496e23b9f 44,57
+packages/ai/src/model-catalog.ts
+  h_ae210496e23b9f 55,57,59,61
+packages/ai/src/api/anthropic-messages.ts
+  h_ae210496e23b9f 511,867
+packages/ai/src/env-api-keys.ts
+  h_ae210496e23b9f 134,138,140,152,155,157
+packages/ai/src/api/lazy.ts
+  h_ae210496e23b9f 50,53,55,58,78
+packages/ai/src/utils/event-stream.ts
+  h_ae210496e23b9f 4-5,13,18,20,26,33,35,37,41,43,49,55,57,60,62,64,69,71,75,80,82,88,97,101,104,106,108,114
+packages/ai/src/providers/anthropic.models.ts
+  h_ae210496e23b9f 4,8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.52-trip",
+  "base_commit_sha": "40ce43f9f15fedcc4f8e7ea67db8e7f61be2c456",
+  "prompts": {},
+  "humans": {
+    "h_ae210496e23b9f": {
+      "author": "Zhengyu Dai 代征宇 <zhengyudai@trip.com>"
+    }
+  }
+}
