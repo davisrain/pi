@@ -515,11 +515,14 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 	options?: AnthropicOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+    // 根据模型配置判断是否支持消息中间夹杂SystemMessage，如果不支持的话，需要将所有SystemMessage整合到消息数组最前方
 	const normalizedContext = resolveTranscript(context, getAnthropicCompat(model).supportsMidConvoSystemMessages);
+    // 返回当前能使用的所有工具数组
 	const currentTools = getCurrentTools(normalizedContext.messages);
 
 	(async () => {
 		const providerThinkingLevel = model.compat?.supportsMidConvoEffort ? (options?.effort ?? "high") : undefined;
+		// 先构建出要返回的AIMessage
 		const output: AssistantMessage = {
 			role: "assistant",
 			content: [],
@@ -545,6 +548,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			let usageModel = model;
 			let inputTransformations: BetaThinkingDroppedInputTransformation[] | undefined;
 
+			// 创建请求模型的客户端
 			if (options?.client) {
 				client = options.client;
 				isOAuth = false;
@@ -594,18 +598,23 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				},
 			);
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+			// 向eventStream里面发送start事件，并且将AI message作为partial传入
 			stream.push({ type: "start", partial: output });
 
 			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
+			// 使用output里面的数组作为内容的Block数组，用于接受anthropic模型的返回
 			const blocks = output.content as Block[];
 
+			// 遍历返回，await每个Promise<event>
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
 				await options?.onProviderStreamEvent?.(event, model);
 				if (event.type === "message_start") {
 					output.responseId = event.message.id;
 					const transformations = event.message.input_transformations;
 					if (Array.isArray(transformations)) inputTransformations = transformations;
+					// 记录返回的模型信息
 					const responseModel = event.message.model;
+					// 如果返回的模型id和请求的不一样，记录到AI message的responseModel里面
 					if (responseModel !== model.id) output.responseModel = responseModel;
 					const fallbackCost =
 						responseModel === model.id
@@ -616,6 +625,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					usageModel = fallbackCost ? { ...model, id: responseModel, cost: fallbackCost } : model;
 					// Capture initial token usage from message_start event
 					// This ensures we have input token counts even if the stream is aborted early
+					// 记录token的使用量和花费
 					output.usage.input = event.message.usage.input_tokens || 0;
 					output.usage.output = event.message.usage.output_tokens || 0;
 					output.usage.cacheRead = event.message.usage.cache_read_input_tokens || 0;
@@ -626,21 +636,27 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					calculateCost(usageModel, output.usage);
 				} else if (event.type === "content_block_start") {
+					// fallback 内容块表示：这次请求在服务端从模型 A 切换到了备用模型 B，这个块标记两者输出的分界位置。
 					if (event.content_block.type === "fallback") {
 						if (output.content.length > 0) {
 							throw new Error("Anthropic performed an unsupported mid-output model fallback");
 						}
 						continue;
 					}
+					// 如果是text类型的内容
 					if (event.content_block.type === "text") {
+						// 生成对应的Block
 						const block: Block = {
 							type: "text",
 							text: event.content_block.text ?? "",
 							index: event.index,
 						};
+						// 放入到AI message里面
 						output.content.push(block);
+						// 推送text_start事件给event-stream
 						stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
 					} else if (event.content_block.type === "thinking") {
+						// 如果是thinking类型的内容，做同样的处理
 						const block: Block = {
 							type: "thinking",
 							thinking: event.content_block.thinking ?? "",
@@ -648,22 +664,30 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							index: event.index,
 						};
 						output.content.push(block);
+						// 推送thinking_start事件
 						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
 					} else if (event.content_block.type === "redacted_thinking") {
+						// 模型产生了一段思考内容，但anthropic的安全过滤把它隐藏了，只返回一份不可读的加密数据
+						// 下次请求模型的时候，会将这份信息传回给模型
 						const block: Block = {
 							type: "thinking",
 							thinking: "[Reasoning redacted]",
+							// data就是这份加密数据，放在thinkingSignature里面
 							thinkingSignature: event.content_block.data,
+							// 标识这是隐藏思考
 							redacted: true,
 							index: event.index,
 						};
 						output.content.push(block);
+						// 同样推送thinking_start事件
 						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
 					} else if (event.content_block.type === "tool_use") {
+						// 如果是tool_use,转换成toolCall类型的Block
 						const block: Block = {
 							type: "toolCall",
 							id: event.content_block.id,
 							name: isOAuth
+								// 去当前可用的工具数组里面匹配，将方法名全小写，没找到，直接用返回里面的方法名
 								? fromClaudeCodeName(event.content_block.name, currentTools)
 								: event.content_block.name,
 							arguments: (event.content_block.input as Record<string, any>) ?? {},
@@ -674,11 +698,17 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
 					}
 				} else if (event.type === "content_block_delta") {
+					// 大类是content_block_delta的情况
+					// 小类是text_delta的情况
 					if (event.delta.type === "text_delta") {
+						// 找到AI message的content这个blocks数组中 index和当前delta的index相等 的block在数组中的下标
 						const index = blocks.findIndex((b) => b.index === event.index);
+						// 找到对应的block
 						const block = blocks[index];
+						// 然后将text内容添加进原先的block中
 						if (block && block.type === "text") {
 							block.text += event.delta.text;
+							// 给eventStream推送text_delta的事件
 							stream.push({
 								type: "text_delta",
 								contentIndex: index,
@@ -687,6 +717,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							});
 						}
 					} else if (event.delta.type === "thinking_delta") {
+						// 同理，thinking_delta也是一样
 						const index = blocks.findIndex((b) => b.index === event.index);
 						const block = blocks[index];
 						if (block && block.type === "thinking") {
@@ -699,11 +730,16 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							});
 						}
 					} else if (event.delta.type === "input_json_delta") {
+						// 如果是input_json_delta类型的
+						// 也是根据event的index找到对应的block
 						const index = blocks.findIndex((b) => b.index === event.index);
 						const block = blocks[index];
 						if (block && block.type === "toolCall") {
+							// 然后追加block里面的partialJson值
 							block.partialJson += event.delta.partial_json;
+							// 然后反序列化成toolCall里面的arguments
 							block.arguments = parseStreamingJson(block.partialJson);
+							// 向event-stream推送tool_call_delta的事件
 							stream.push({
 								type: "toolcall_delta",
 								contentIndex: index,
@@ -712,19 +748,26 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							});
 						}
 					} else if (event.delta.type === "signature_delta") {
+						// 如果是signature_delta类型
+						// 同理根据index找到block
 						const index = blocks.findIndex((b) => b.index === event.index);
 						const block = blocks[index];
+						// 修改thinking类型的block里面的thinkingSignature
 						if (block && block.type === "thinking") {
 							block.thinkingSignature = block.thinkingSignature || "";
 							block.thinkingSignature += event.delta.signature;
 						}
 					}
 				} else if (event.type === "content_block_stop") {
+					// 如果大类是content_block_stop类，说明是停止事件了
+					// 根据index找到对应的block
 					const index = blocks.findIndex((b) => b.index === event.index);
 					const block = blocks[index];
 					if (block) {
+						// 删除block中的index属性
 						delete (block as any).index;
 						if (block.type === "text") {
+							// 给event-stream发送text_end事件
 							stream.push({
 								type: "text_end",
 								contentIndex: index,
@@ -732,6 +775,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 								partial: output,
 							});
 						} else if (block.type === "thinking") {
+							// 给event-stream发送thinking_end事件
 							stream.push({
 								type: "thinking_end",
 								contentIndex: index,
@@ -739,10 +783,13 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 								partial: output,
 							});
 						} else if (block.type === "toolCall") {
+							// 将partialJson反序列化成arguments
 							block.arguments = parseStreamingJson(block.partialJson);
 							// Finalize in-place and strip the scratch buffer so replay only
 							// carries parsed arguments.
+							// 删除block中的partialJson元素
 							delete (block as { partialJson?: string }).partialJson;
+							// 给event-stream发送toolcall_end事件
 							stream.push({
 								type: "toolcall_end",
 								contentIndex: index,
@@ -752,12 +799,18 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						}
 					}
 				} else if (event.type === "message_delta") {
+					// 如果是message_delta大类的，是用于更新整条assistant消息的事件，
+					// 主要告诉为什么停止生成 和 这次请求用了多少token
 					const transformations = event.input_transformations;
 					if (Array.isArray(transformations)) inputTransformations = transformations;
 					if (event.delta.stop_reason) {
+						// 记录模型返回的stopReason
 						output.rawStopReason = event.delta.stop_reason;
+						// 将模型返回的stopReason映射成pi内置的stopReason
 						const stopReasonResult = mapStopReason(event.delta.stop_reason, event.delta.stop_details);
+						// 记录pi的stopReason
 						output.stopReason = stopReasonResult.stopReason;
+						// 如果存在errorMessage，也赋值给AIMessage
 						if (stopReasonResult.errorMessage) {
 							output.errorMessage = stopReasonResult.errorMessage;
 						}
@@ -801,13 +854,24 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				throw new Error("Request was aborted");
 			}
 
+			// 如果stopReason还是pending，说明anthropic结束了流但没有给stopReason
 			if (output.stopReason === "pending") {
 				throw new Error("Anthropic stream ended without a stop reason");
 			}
+			// 如果是error或者aborted，报错
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
 				throw new Error(output.errorMessage || "An unknown error occurred");
 			}
+			// 是anthropic的输入调整记录，告诉客户端，你发来的历史消息中，哪些内容在送给模型前被服务端移除了，以及为什么移除
+			// 例如：
+			// {
+			//     type: "thinking_dropped",
+			//     path: "messages.3.content.0",
+			//     reason: "prefix_binding_mismatch"
+			// }
+			// 请求中第 4 条消息的第 1 个内容块是历史思考块。由于它依赖的前文发生了变化，服务端把它从本次模型输入中移除了。
 			if (inputTransformations && inputTransformations.length > 0) {
+				// 添加进AIMessage的diagnostics数组中
 				appendAssistantMessageDiagnostic(output, {
 					type: "anthropic_input_transformations",
 					timestamp: Date.now(),
@@ -821,9 +885,12 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				});
 			}
 
+			// 给event-stream发送done类型的事件，带上stopReason
 			stream.push({ type: "done", reason: output.stopReason, message: output });
+			// 立马调用event-stream的end方法关闭流
 			stream.end();
 		} catch (error) {
+			// 如果中途报错的话，也将所有block中的index和partialJson属性删除了
 			for (const block of output.content) {
 				delete (block as { index?: number }).index;
 				// partialJson is only a streaming scratch buffer; never persist it.
@@ -831,6 +898,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+			// 给event-stream发送error类型的事件
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		}
